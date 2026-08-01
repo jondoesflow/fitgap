@@ -1,0 +1,27 @@
+# fitgap configuration — copy to fitgap.yaml and edit.
+# fitgap.yaml is gitignored so client-specific settings stay local.
+
+model: claude-sonnet-4-6
+
+# Anonymisation rules applied before any text is sent to an external API.
+redact_file: redact.yaml
+
+# rapidfuzz similarity (50-100) above which two requirements are merged.
+dedupe_threshold: 90
+
+ado:
+  organization: ""          # e.g. contoso
+  project: ""               # e.g. CRM-Replacement
+  pat_env_var: AZURE_DEVOPS_PAT
+  area_path: null           # e.g. CRM-Replacement\Requirements
+  # wiql: optional full WIQL override
+
+verify:
+  mode: mcp                 # mcp | web_search (both restricted to learn.microsoft.com)
+
+output:
+  workspace: fitgap_workspace/requirements.json
+  register: fitgap_workspace/fitgap_register.xlsx
+
+# Saved Excel column mappings (written automatically on first ingest of a file).
+xlsx_mappings: {}

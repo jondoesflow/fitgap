@@ -1,0 +1,20 @@
+# Anonymisation rules — copy to redact.yaml and edit per engagement.
+# redact.yaml is gitignored. Every substitution is logged to the workspace
+# redaction log so you can audit exactly what left the machine.
+
+client_names:
+  - Contoso
+  - Contoso Ltd
+
+people:
+  - Jane Doe
+
+codenames:
+  - Project Phoenix
+
+redact_emails: true
+
+# Optional custom regex rules.
+custom: []
+#  - pattern: "\\bCON-\\d{4}\\b"
+#    replacement: "[TICKET]"

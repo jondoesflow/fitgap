@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Real project config/data — only the .example files are committed
+fitgap.yaml
+redact.yaml
+fitgap_workspace/
