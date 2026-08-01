@@ -11,8 +11,9 @@ from fitgap import __version__
 from fitgap.config import load_config, save_config
 from fitgap.ingest.docx_parser import parse_docx
 from fitgap.ingest.xlsx_parser import parse_xlsx, resolve_mapping
-from fitgap.models import ParsedRequirement, SourceReliability
+from fitgap.models import ParsedRequirement, SourceReliability, Workspace
 from fitgap.normalise import build_workspace, dedupe
+from fitgap.redact import load_rules
 
 app = typer.Typer(
     name="fitgap",
@@ -98,6 +99,79 @@ def ingest(
     if inferred:
         typer.echo(f"  transcript-inferred (double-check these): {inferred}")
     typer.echo(f"Workspace written to {out_path}")
+
+
+@app.command()
+def classify(
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    workspace_path: Path | None = typer.Option(
+        None, "--workspace", "-w", help="Workspace JSON (default from config)."
+    ),
+    batch_size: int = typer.Option(10, "--batch-size", min=1, max=25),
+    force: bool = typer.Option(
+        False, "--force", help="Re-classify requirements that already have a result."
+    ),
+) -> None:
+    """Classify each requirement against the fit-gap taxonomy (uses the Anthropic API)."""
+    import anthropic
+
+    from fitgap.classify import Classifier
+
+    config = load_config(config_path)
+    ws_path = workspace_path or Path(config.output.workspace)
+    if not ws_path.exists():
+        typer.secho(
+            f"Workspace not found: {ws_path} — run 'fitgap ingest' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    workspace = Workspace.load(ws_path)
+
+    rules = load_rules(Path(config.redact_file))
+    if not (rules.client_names or rules.people or rules.codenames or rules.custom):
+        typer.secho(
+            f"Note: no name-based redaction rules loaded from {config.redact_file} "
+            "(emails are still redacted by default).",
+            fg=typer.colors.YELLOW,
+        )
+
+    classifier = Classifier(
+        config, rules, anthropic.Anthropic(), batch_size=batch_size
+    )
+    typer.echo(f"Classifying with {config.model}...")
+    classified, missing = classifier.classify_workspace(workspace, force=force)
+    workspace.save(ws_path)
+
+    counts = Counter(
+        r.classification.category.value
+        for r in workspace.requirements
+        if r.classification
+    )
+    low_confidence = sum(
+        1
+        for r in workspace.requirements
+        if r.classification and r.classification.confidence.value == "Low"
+    )
+    redacted = len(workspace.redaction_log)
+    typer.echo(f"\nClassified {classified} requirement(s):")
+    for category, count in counts.most_common():
+        typer.echo(f"  {category}: {count}")
+    if low_confidence:
+        typer.secho(
+            f"  Low confidence (review carefully): {low_confidence}",
+            fg=typer.colors.YELLOW,
+        )
+    if missing:
+        typer.secho(
+            f"  NOT classified (model skipped, re-run classify): {', '.join(missing)}",
+            fg=typer.colors.RED,
+        )
+    if redacted:
+        typer.echo(f"Redaction log entries: {redacted}")
+    typer.echo(f"Workspace updated: {ws_path}")
 
 
 def main() -> None:
