@@ -45,8 +45,13 @@ class StageUsage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    #: Model that actually served these calls, read back from the response.
+    #: Stages can run on different models (see VerifyConfig.model), so pricing
+    #: must follow the stage rather than one run-wide model. None when unknown
+    #: or when a stage mixed models, in which case the caller's model is used.
+    model: str | None = None
 
-    def add_usage(self, usage) -> None:
+    def add_usage(self, usage, model: str | None = None) -> None:
         self.calls += 1
         self.input_tokens += getattr(usage, "input_tokens", 0) or 0
         self.output_tokens += getattr(usage, "output_tokens", 0) or 0
@@ -54,16 +59,27 @@ class StageUsage:
         self.cache_write_tokens += (
             getattr(usage, "cache_creation_input_tokens", 0) or 0
         )
+        self._note_model(model)
+
+    def _note_model(self, model: str | None) -> None:
+        if model is None:
+            return
+        if self.model is None and self.calls <= 1:
+            self.model = model
+        elif self.model != model:
+            self.model = None  # mixed models — fall back to the caller's
 
     def merge(self, other: "StageUsage") -> None:
+        merged_model = other.model if self.calls == 0 else self.model
         self.calls += other.calls
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_write_tokens += other.cache_write_tokens
+        self.model = merged_model if merged_model == other.model else None
 
     def cost_usd(self, model: str) -> float | None:
-        prices = lookup_pricing(model)
+        prices = lookup_pricing(self.model or model)
         if prices is None:
             return None
         input_price, output_price = prices
@@ -89,7 +105,9 @@ class UsageTracker:
         usage = getattr(response, "usage", None)
         if usage is None:
             return
-        self.stages.setdefault(stage, StageUsage()).add_usage(usage)
+        self.stages.setdefault(stage, StageUsage()).add_usage(
+            usage, getattr(response, "model", None)
+        )
 
     def merge(self, other: "UsageTracker") -> None:
         for stage, stage_usage in other.stages.items():
@@ -106,23 +124,40 @@ class UsageTracker:
         if not self.stages:
             return []
         lines = []
+        costs = []
         for stage, stage_usage in self.stages.items():
             cost = stage_usage.cost_usd(model)
+            costs.append(cost)
             cost_text = f"${cost:,.4f}" if cost is not None else "cost unknown"
+            # Name the model only when the stage did not use the run's model.
+            served_by = stage_usage.model
+            suffix = f" [{served_by}]" if served_by and served_by != model else ""
+            cached = stage_usage.cache_read_tokens
+            cache_note = f", {cached:,} cached" if cached else ""
             lines.append(
                 f"  {stage}: {cost_text}  ({stage_usage.calls} call(s), "
-                f"{stage_usage.total_input:,} in / {stage_usage.output_tokens:,} out tokens)"
+                f"{stage_usage.total_input:,} in{cache_note} / "
+                f"{stage_usage.output_tokens:,} out tokens){suffix}"
             )
         if len(self.stages) > 1:
             total = self.total()
-            cost = total.cost_usd(model)
+            # Sum per-stage costs: stages may run on different models, so the
+            # merged token counts cannot be priced with a single rate.
+            cost = None if any(c is None for c in costs) else sum(costs)
             cost_text = f"${cost:,.4f}" if cost is not None else "cost unknown"
+            cached = total.cache_read_tokens
+            cache_note = f", {cached:,} cached" if cached else ""
             lines.append(
                 f"  TOTAL: {cost_text}  ({total.calls} call(s), "
-                f"{total.total_input:,} in / {total.output_tokens:,} out tokens)"
+                f"{total.total_input:,} in{cache_note} / "
+                f"{total.output_tokens:,} out tokens)"
             )
-        if lookup_pricing(model) is None:
+        if any(c is None for c in costs):
+            unpriced = sorted(
+                {u.model or model for u, c in zip(self.stages.values(), costs) if c is None}
+            )
             lines.append(
-                f"  (no pricing table entry for '{model}' — token counts only)"
+                f"  (no pricing table entry for {', '.join(repr(m) for m in unpriced)}"
+                " — token counts only)"
             )
         return lines

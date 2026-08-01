@@ -35,6 +35,11 @@ from fitgap.redact import RedactionRules, anonymise
 
 LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
 MCP_BETA = "mcp-client-2025-04-04"
+#: Newer MCP beta. Required for per-tool enablement, which needs an explicit
+#: `mcp_toolset` entry in `tools` alongside `mcp_servers`.
+MCP_TOOLSET_BETA = "mcp-client-2025-11-20"
+#: Compact search over Learn: title + URL + excerpt, capped per chunk.
+LEARN_SEARCH_TOOL = "microsoft_docs_search"
 
 VERIFY_SYSTEM_PROMPT = """\
 You verify claims about Microsoft Dynamics 365 and Power Platform capabilities \
@@ -221,33 +226,73 @@ class Verifier:
             notes=result.get("notes"),
         )
 
+    def _system(self):
+        """System prompt, cached when enabled.
+
+        Rendering order is tools -> system -> messages, so a breakpoint on the
+        last system block caches the tool definitions too. That prefix is
+        identical for every claim, so it is reused across requirements and
+        across each round of the server-side tool loop.
+        """
+        if not self.config.verify.cache_prompt:
+            return VERIFY_SYSTEM_PROMPT
+        return [
+            {
+                "type": "text",
+                "text": VERIFY_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
     def _call_model(self, user_prompt: str) -> list:
-        if self.config.verify.mode == "mcp":
-            response = self.client.beta.messages.create(
-                model=self.config.model,
-                max_tokens=2048,
-                system=VERIFY_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                mcp_servers=[
-                    {
-                        "type": "url",
-                        "url": LEARN_MCP_URL,
-                        "name": "microsoft-learn",
-                    }
-                ],
-                betas=[MCP_BETA],
-            )
+        settings = self.config.verify
+        model = settings.model or self.config.model
+        messages = [{"role": "user", "content": user_prompt}]
+
+        if settings.mode == "mcp":
+            mcp_servers = [
+                {"type": "url", "url": LEARN_MCP_URL, "name": "microsoft-learn"}
+            ]
+            if settings.search_only:
+                # Per-tool enablement needs the newer beta, which in turn
+                # requires an explicit mcp_toolset entry in `tools`. Withholding
+                # microsoft_docs_fetch keeps whole Learn pages out of context.
+                response = self.client.beta.messages.create(
+                    model=model,
+                    max_tokens=2048,
+                    system=self._system(),
+                    messages=messages,
+                    mcp_servers=mcp_servers,
+                    tools=[
+                        {
+                            "type": "mcp_toolset",
+                            "mcp_server_name": "microsoft-learn",
+                            "default_config": {"enabled": False},
+                            "configs": [{"name": LEARN_SEARCH_TOOL, "enabled": True}],
+                        }
+                    ],
+                    betas=[MCP_TOOLSET_BETA],
+                )
+            else:
+                response = self.client.beta.messages.create(
+                    model=model,
+                    max_tokens=2048,
+                    system=self._system(),
+                    messages=messages,
+                    mcp_servers=mcp_servers,
+                    betas=[MCP_BETA],
+                )
         else:  # web_search fallback, locked to learn.microsoft.com
             response = self.client.messages.create(
-                model=self.config.model,
+                model=model,
                 max_tokens=2048,
-                system=VERIFY_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
+                system=self._system(),
+                messages=messages,
                 tools=[
                     {
                         "type": "web_search_20250305",
                         "name": "web_search",
-                        "max_uses": 5,
+                        "max_uses": settings.max_searches,
                         "allowed_domains": ["learn.microsoft.com"],
                     }
                 ],

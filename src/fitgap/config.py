@@ -23,6 +23,28 @@ class VerifyConfig(BaseModel):
     # restricted to learn.microsoft.com.
     mode: Literal["mcp", "web_search"] = "mcp"
 
+    # Verification dominates run cost: the model researches Learn per claim and
+    # the server-side tool loop re-sends everything it has fetched on every
+    # round. The knobs below trade cost against confirmation rate — measure
+    # with `fitgap benchmark-verify` before changing them.
+
+    #: Model used for verification. None = use the top-level `model`.
+    #: Verification is a constrained search-and-cite task, so a cheaper model
+    #: may do just as well; the URL liveness guard still rejects bad citations.
+    model: str | None = None
+
+    #: MCP only. Expose `microsoft_docs_search` (compact excerpts) but not
+    #: `microsoft_docs_fetch` (whole pages, the main driver of input tokens).
+    #: Much cheaper, but excerpts may not show PREVIEW/DEPRECATED banners.
+    search_only: bool = False
+
+    #: Cache the system prompt and tool definitions across calls and across
+    #: each round of the server-side tool loop. No behavioural change.
+    cache_prompt: bool = True
+
+    #: web_search mode only: how many searches the model may run per claim.
+    max_searches: int = Field(default=5, ge=1, le=10)
+
 
 class OutputConfig(BaseModel):
     # "register" is the YAML key; the attribute is renamed because it would

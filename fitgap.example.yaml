@@ -18,6 +18,17 @@ ado:
 
 verify:
   mode: mcp                 # mcp | web_search (both restricted to learn.microsoft.com)
+  # Verification dominates run cost: the model researches Learn once per claim
+  # and the server-side tool loop re-sends everything fetched so far on every
+  # round. Measure any change with `fitgap benchmark-verify` — it reports cost
+  # AND how many claims still confirm, so you can see functionality loss.
+  cache_prompt: true        # cache system prompt + tool defs across calls. Free win.
+  # search_only: true       # expose microsoft_docs_search but NOT microsoft_docs_fetch,
+                            # which pulls whole Learn pages into context. Much cheaper;
+                            # excerpts may miss PREVIEW/DEPRECATED banners.
+  # model: claude-haiku-4-5 # cheaper model for verification only. The URL liveness
+                            # guard still rejects fabricated citations.
+  max_searches: 5           # web_search mode only: searches allowed per claim
 
 output:
   workspace: fitgap_workspace/requirements.json
