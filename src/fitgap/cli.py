@@ -175,6 +175,73 @@ def classify(
 
 
 @app.command()
+def verify(
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    workspace_path: Path | None = typer.Option(
+        None, "--workspace", "-w", help="Workspace JSON (default from config)."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-verify rows that already have a verified citation."
+    ),
+) -> None:
+    """Verify every capability claim against live Microsoft Learn documentation."""
+    import anthropic
+
+    from fitgap.verify import Verifier
+
+    config = load_config(config_path)
+    ws_path = workspace_path or Path(config.output.workspace)
+    if not ws_path.exists():
+        typer.secho(
+            f"Workspace not found: {ws_path} — run 'fitgap ingest' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    workspace = Workspace.load(ws_path)
+    rules = load_rules(Path(config.redact_file))
+
+    verifier = Verifier(config, rules, anthropic.Anthropic())
+    typer.echo(
+        f"Verifying capability claims against Microsoft Learn "
+        f"({config.verify.mode} mode)..."
+    )
+    counts = verifier.verify_workspace(workspace, force=force)
+    workspace.save(ws_path)
+
+    typer.echo(f"\n  Verified with live citation: {counts['verified']}")
+    if counts["unconfirmed"]:
+        typer.secho(
+            f"  UNCONFIRMED — validate manually: {counts['unconfirmed']}",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"  No claim to verify (gaps/out of scope): {counts['not_required']}")
+    if counts["skipped"]:
+        typer.secho(
+            f"  Skipped (unclassified): {counts['skipped']}", fg=typer.colors.RED
+        )
+    preview = sum(
+        1
+        for r in workspace.requirements
+        if r.verification and r.verification.preview_flag
+    )
+    deprecated = sum(
+        1
+        for r in workspace.requirements
+        if r.verification and r.verification.deprecated_flag
+    )
+    if preview:
+        typer.secho(f"  PREVIEW features relied on: {preview}", fg=typer.colors.YELLOW)
+    if deprecated:
+        typer.secho(
+            f"  DEPRECATED features relied on: {deprecated}", fg=typer.colors.RED
+        )
+    typer.echo(f"Workspace updated: {ws_path}")
+
+
+@app.command()
 def report(
     config_path: Path = typer.Option(
         Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."

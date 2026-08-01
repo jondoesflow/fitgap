@@ -28,11 +28,13 @@ class FakeAnthropic:
     """Mimics the slice of anthropic.Anthropic the pipeline touches.
 
     ``responder`` receives the request kwargs and returns the content blocks
-    of the fake response.
+    of the fake response. Both ``client.messages`` and ``client.beta.messages``
+    (used for MCP-connector calls) share the same recorder.
     """
 
     def __init__(self, responder: Callable[[dict], list[Any]]):
         self.messages = FakeMessages(responder)
+        self.beta = SimpleNamespace(messages=self.messages)
 
     @property
     def calls(self) -> list[dict]:
