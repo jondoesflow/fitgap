@@ -12,7 +12,9 @@ redact.yaml
 fitgap_workspace/
 
 # Client material must never be committed — transcripts, source docs
-Transcript*.txt
-transcript*.txt
+*Transcript*.txt
+*transcript*.txt
+*Transcript*.docx
+*transcript*.docx
 *.vtt
 sample_data/

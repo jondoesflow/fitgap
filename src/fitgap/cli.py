@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 
 from fitgap import __version__
+from fitgap.api_errors import api_guard
 from fitgap.config import load_config, save_config
 from fitgap.ingest.docx_parser import parse_docx
 from fitgap.ingest.xlsx_parser import parse_xlsx, resolve_mapping
@@ -57,9 +58,45 @@ def _progress_bar():
     )
 
 
+def _validate_api_key(key: str) -> None:
+    """Reject keys that cannot be sent as an HTTP header.
+
+    A control or non-ASCII character in the key survives httpx's own checks
+    when it sits mid-value, and is then rejected at Anthropic's Cloudflare edge
+    as a malformed request: HTTP 400 with an *empty* body and no request-id.
+    That is impossible to diagnose from the SDK error, so catch it here.
+
+    Only positions and code points are reported — never key material.
+    """
+    bad = [
+        (i, ord(ch))
+        for i, ch in enumerate(key)
+        if ord(ch) < 0x20 or ord(ch) == 0x7F or ord(ch) > 0x7E
+    ]
+    if not bad:
+        return
+    detail = ", ".join(f"index {i} = U+{cp:04X}" for i, cp in bad[:10])
+    typer.secho(
+        "ANTHROPIC_API_KEY contains character(s) that are not valid in an HTTP "
+        f"header: {detail}\n"
+        f"(key length {len(key)}; the value itself is not shown)\n\n"
+        "The key was probably corrupted by a copy-paste or by how it was "
+        "stored. Re-copy it from\n"
+        "https://console.anthropic.com/settings/keys and set it again:\n"
+        '  setx ANTHROPIC_API_KEY "sk-ant-..."   (then open a NEW terminal)\n'
+        "Without this check the request fails as an opaque HTTP 400 with an "
+        "empty body.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
 def _require_api_key() -> None:
     """Fail with clear guidance instead of an SDK traceback."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        _validate_api_key(key)
         return
     typer.secho(
         "ANTHROPIC_API_KEY is not set — this stage calls the Anthropic API.\n"
@@ -138,7 +175,7 @@ def ingest(
         extractor = TranscriptExtractor(
             config, rules, anthropic.Anthropic(), usage_tracker=tracker
         )
-        with _progress_bar() as progress:
+        with api_guard("transcript extraction"), _progress_bar() as progress:
             task = progress.add_task(
                 f"Extracting from {transcript_path.name} ({config.model})",
                 total=None,
@@ -271,7 +308,7 @@ def classify(
         batch_size=batch_size,
         usage_tracker=tracker,
     )
-    with _progress_bar() as progress:
+    with api_guard("classify"), _progress_bar() as progress:
         task = progress.add_task(f"Classifying ({config.model})", total=None)
         classified, missing = classifier.classify_workspace(
             workspace,
@@ -345,7 +382,7 @@ def verify(
 
     tracker = UsageTracker()
     verifier = Verifier(config, rules, anthropic.Anthropic(), usage_tracker=tracker)
-    with _progress_bar() as progress:
+    with api_guard("verify"), _progress_bar() as progress:
         task = progress.add_task(
             f"Verifying against Microsoft Learn ({config.verify.mode} mode)",
             total=None,
