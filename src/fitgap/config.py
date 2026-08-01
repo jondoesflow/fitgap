@@ -1,12 +1,18 @@
-"""Load and persist fitgap.yaml — the single config file for the tool."""
+"""Load and persist fitgap.yaml — the single config file for the tool.
+
+Writes go through ruamel.yaml round-tripping so user comments and unknown
+keys in fitgap.yaml survive every save. API keys are never written here —
+see fitgap.llm.keys.
+"""
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AdoConfig(BaseModel):
@@ -45,8 +51,16 @@ class XlsxMapping(BaseModel):
     functional_area: str | None = None
 
 
-class Config(BaseModel):
+class LLMConfig(BaseModel):
+    """Active provider/model — a per-engagement decision (data goes to this
+    provider after redaction). Set with ``fitgap model use provider/model``."""
+
+    provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
+
+
+class Config(BaseModel):
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     redact_file: str = "redact.yaml"
     dedupe_threshold: int = Field(default=90, ge=50, le=100)
     ado: AdoConfig = Field(default_factory=AdoConfig)
@@ -54,6 +68,42 @@ class Config(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     # Saved interactive column mappings, keyed by xlsx file name.
     xlsx_mappings: dict[str, XlsxMapping] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_model_key(cls, data):
+        """Configs written before multi-provider support have a top-level
+        ``model:`` key; map it onto llm.model (provider anthropic)."""
+        if isinstance(data, dict) and "model" in data:
+            data = dict(data)
+            legacy = data.pop("model")
+            data.setdefault("llm", {"provider": "anthropic", "model": legacy})
+        return data
+
+    @property
+    def model(self) -> str:
+        """The active model string (kept for the pipeline's existing callers)."""
+        return self.llm.model
+
+
+def _ruamel():
+    from ruamel.yaml import YAML
+
+    rt = YAML()
+    rt.preserve_quotes = True
+    rt.width = 4096
+    return rt
+
+
+def _deep_update(doc, data: dict) -> None:
+    """Set keys from ``data`` into the ruamel document, recursing into dicts
+    so comments attached to untouched keys survive. Keys present in the file
+    but unknown to fitgap are left alone."""
+    for key, value in data.items():
+        if isinstance(value, dict) and isinstance(doc.get(key), dict):
+            _deep_update(doc[key], value)
+        else:
+            doc[key] = value
 
 
 def load_config(path: Path) -> Config:
@@ -65,8 +115,32 @@ def load_config(path: Path) -> Config:
 
 
 def save_config(config: Config, path: Path) -> None:
+    rt = _ruamel()
+    doc = rt.load(path.read_text(encoding="utf-8")) if path.exists() else None
+    if doc is None:
+        from ruamel.yaml.comments import CommentedMap
+
+        doc = CommentedMap()
+    doc.pop("model", None)  # legacy key, superseded by the llm block
+    _deep_update(doc, config.model_dump(mode="json", exclude_none=True, by_alias=True))
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = config.model_dump(mode="json", exclude_none=True, by_alias=True)
-    path.write_text(
-        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
+    buffer = io.StringIO()
+    rt.dump(doc, buffer)
+    path.write_text(buffer.getvalue(), encoding="utf-8")
+
+
+def set_active_llm(path: Path, provider: str, model: str) -> None:
+    """Update only the ``llm:`` block of fitgap.yaml, preserving everything
+    else in the file (content, ordering, comments) untouched."""
+    rt = _ruamel()
+    doc = rt.load(path.read_text(encoding="utf-8")) if path.exists() else None
+    if doc is None:
+        from ruamel.yaml.comments import CommentedMap
+
+        doc = CommentedMap()
+    doc.pop("model", None)  # legacy key, superseded by the llm block
+    _deep_update(doc, {"llm": {"provider": provider, "model": model}})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    buffer = io.StringIO()
+    rt.dump(doc, buffer)
+    path.write_text(buffer.getvalue(), encoding="utf-8")
