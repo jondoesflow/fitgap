@@ -186,10 +186,13 @@ def _chunk(cues: list[Cue], char_limit: int = CHUNK_CHAR_LIMIT) -> list[list[Cue
 
 
 class TranscriptExtractor:
-    def __init__(self, config: Config, rules: RedactionRules, client) -> None:
+    def __init__(
+        self, config: Config, rules: RedactionRules, client, usage_tracker=None
+    ) -> None:
         self.config = config
         self.rules = rules
         self.client = client
+        self.usage_tracker = usage_tracker
 
     def extract(
         self,
@@ -233,6 +236,8 @@ class TranscriptExtractor:
                 tools=[EXTRACT_TOOL],
                 tool_choice={"type": "tool", "name": "record_extracted_requirements"},
             )
+            if self.usage_tracker:
+                self.usage_tracker.record("extract", response)
             tool_input = None
             for block in response.content:
                 if getattr(block, "type", None) == "tool_use":

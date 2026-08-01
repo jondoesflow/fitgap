@@ -91,11 +91,13 @@ class Classifier:
         rules: RedactionRules,
         client,  # anthropic.Anthropic or a test double
         batch_size: int = DEFAULT_BATCH_SIZE,
+        usage_tracker=None,  # fitgap.usage.UsageTracker
     ) -> None:
         self.config = config
         self.rules = rules
         self.client = client
         self.batch_size = batch_size
+        self.usage_tracker = usage_tracker
 
     def classify_workspace(
         self,
@@ -164,6 +166,8 @@ class Classifier:
             tools=[CLASSIFY_TOOL],
             tool_choice={"type": "tool", "name": "record_classifications"},
         )
+        if self.usage_tracker:
+            self.usage_tracker.record("classify", response)
 
         tool_input = None
         for block in response.content:

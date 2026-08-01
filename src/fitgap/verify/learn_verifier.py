@@ -110,11 +110,13 @@ class Verifier:
         rules: RedactionRules,
         client,  # anthropic.Anthropic or a test double
         url_checker: Callable[[str], UrlCheckResult] = check_learn_url,
+        usage_tracker=None,  # fitgap.usage.UsageTracker
     ) -> None:
         self.config = config
         self.rules = rules
         self.client = client
         self.url_checker = url_checker
+        self.usage_tracker = usage_tracker
 
     # ------------------------------------------------------------------ API
 
@@ -250,6 +252,8 @@ class Verifier:
                     }
                 ],
             )
+        if self.usage_tracker:
+            self.usage_tracker.record("verify", response)
         return response.content
 
     @staticmethod

@@ -15,12 +15,21 @@ from fitgap.ingest.xlsx_parser import parse_xlsx, resolve_mapping
 from fitgap.models import ParsedRequirement, SourceReliability, Workspace
 from fitgap.normalise import build_workspace, dedupe
 from fitgap.redact import load_rules
+from fitgap.usage import UsageTracker
 
 app = typer.Typer(
     name="fitgap",
     help="Fit-gap analysis assistant for D365 CE / Power Platform consultants.",
     no_args_is_help=True,
 )
+
+
+def _print_cost(tracker: UsageTracker | None, model: str, title: str) -> None:
+    if tracker is None or not tracker.stages:
+        return
+    typer.secho(f"\n{title}", fg=typer.colors.CYAN)
+    for line in tracker.summary_lines(model):
+        typer.echo(line)
 
 
 def _progress_bar():
@@ -112,6 +121,7 @@ def ingest(
     parsed: list[ParsedRequirement] = []
     transcript_redactions = []
     config_changed = False
+    tracker = UsageTracker()
 
     for transcript_path in transcripts:
         if not transcript_path.exists():
@@ -125,7 +135,9 @@ def ingest(
         from fitgap.ingest.transcript import TranscriptExtractor
 
         rules = load_rules(Path(config.redact_file))
-        extractor = TranscriptExtractor(config, rules, anthropic.Anthropic())
+        extractor = TranscriptExtractor(
+            config, rules, anthropic.Anthropic(), usage_tracker=tracker
+        )
         with _progress_bar() as progress:
             task = progress.add_task(
                 f"Extracting from {transcript_path.name} ({config.model})",
@@ -209,6 +221,8 @@ def ingest(
     if inferred:
         typer.echo(f"  transcript-inferred (double-check these): {inferred}")
     typer.echo(f"Workspace written to {out_path}")
+    _print_cost(tracker, config.model, "Claude API cost (ingest):")
+    return tracker
 
 
 @app.command()
@@ -249,8 +263,13 @@ def classify(
             fg=typer.colors.YELLOW,
         )
 
+    tracker = UsageTracker()
     classifier = Classifier(
-        config, rules, anthropic.Anthropic(), batch_size=batch_size
+        config,
+        rules,
+        anthropic.Anthropic(),
+        batch_size=batch_size,
+        usage_tracker=tracker,
     )
     with _progress_bar() as progress:
         task = progress.add_task(f"Classifying ({config.model})", total=None)
@@ -290,6 +309,8 @@ def classify(
     if redacted:
         typer.echo(f"Redaction log entries: {redacted}")
     typer.echo(f"Workspace updated: {ws_path}")
+    _print_cost(tracker, config.model, "Claude API cost (classify):")
+    return tracker
 
 
 @app.command()
@@ -322,7 +343,8 @@ def verify(
     workspace = Workspace.load(ws_path)
     rules = load_rules(Path(config.redact_file))
 
-    verifier = Verifier(config, rules, anthropic.Anthropic())
+    tracker = UsageTracker()
+    verifier = Verifier(config, rules, anthropic.Anthropic(), usage_tracker=tracker)
     with _progress_bar() as progress:
         task = progress.add_task(
             f"Verifying against Microsoft Learn ({config.verify.mode} mode)",
@@ -365,6 +387,8 @@ def verify(
             f"  DEPRECATED features relied on: {deprecated}", fg=typer.colors.RED
         )
     typer.echo(f"Workspace updated: {ws_path}")
+    _print_cost(tracker, config.model, "Claude API cost (verify):")
+    return tracker
 
 
 @app.command()
@@ -427,15 +451,22 @@ def run(
     ),
 ) -> None:
     """Full pipeline: ingest -> classify -> verify -> report."""
-    ingest(
-        paths=paths,
-        config_path=config_path,
-        out=None,
-        no_input=no_input,
-        transcripts=transcripts,
+    run_tracker = UsageTracker()
+    run_tracker.merge(
+        ingest(
+            paths=paths,
+            config_path=config_path,
+            out=None,
+            no_input=no_input,
+            transcripts=transcripts,
+        )
     )
     typer.echo("")
-    classify(config_path=config_path, workspace_path=None, batch_size=10, force=False)
+    run_tracker.merge(
+        classify(
+            config_path=config_path, workspace_path=None, batch_size=10, force=False
+        )
+    )
     typer.echo("")
     if skip_verify:
         typer.secho(
@@ -444,9 +475,16 @@ def run(
             fg=typer.colors.YELLOW,
         )
     else:
-        verify(config_path=config_path, workspace_path=None, force=False)
+        run_tracker.merge(
+            verify(config_path=config_path, workspace_path=None, force=False)
+        )
         typer.echo("")
     report(config_path=config_path, workspace_path=None, out=None)
+    _print_cost(
+        run_tracker,
+        load_config(config_path).model,
+        "=== Total Claude API cost for this run ===",
+    )
 
 
 @app.command("eval")
@@ -492,8 +530,11 @@ def eval_cmd(
         f"Classifying {len(golden.requirements)} golden requirements with "
         f"{config.model}..."
     )
+    tracker = UsageTracker()
     # Golden set text is synthetic — no redaction rules needed.
-    classifier = Classifier(config, RedactionRules(redact_emails=False), client)
+    classifier = Classifier(
+        config, RedactionRules(redact_emails=False), client, usage_tracker=tracker
+    )
     classifier.classify_workspace(workspace)
 
     result = score_classifications(golden, workspace)
@@ -502,9 +543,12 @@ def eval_cmd(
         from fitgap.verify import Verifier
 
         typer.echo("Verifying capability claims against Microsoft Learn...")
-        Verifier(config, RedactionRules(redact_emails=False), client).verify_workspace(
-            workspace
-        )
+        Verifier(
+            config,
+            RedactionRules(redact_emails=False),
+            client,
+            usage_tracker=tracker,
+        ).verify_workspace(workspace)
         result = score_citations(workspace, result)
 
     if out:
@@ -533,6 +577,7 @@ def eval_cmd(
         for req_id, url in result.dead_citations:
             typer.secho(f"  DEAD CITATION {req_id}: {url}", fg=typer.colors.RED)
 
+    _print_cost(tracker, config.model, "Claude API cost (eval):")
     if result.gates_met:
         typer.secho("\nGATES MET — ready for real projects.", fg=typer.colors.GREEN)
     else:

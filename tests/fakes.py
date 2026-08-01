@@ -21,7 +21,15 @@ class FakeMessages:
 
     def create(self, **kwargs) -> SimpleNamespace:
         self.calls.append(kwargs)
-        return SimpleNamespace(content=self.responder(kwargs))
+        return SimpleNamespace(
+            content=self.responder(kwargs),
+            usage=SimpleNamespace(
+                input_tokens=1000,
+                output_tokens=200,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+        )
 
 
 class FakeAnthropic:
