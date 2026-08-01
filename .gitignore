@@ -10,3 +10,9 @@ dist/
 fitgap.yaml
 redact.yaml
 fitgap_workspace/
+
+# Client material must never be committed — transcripts, source docs
+Transcript*.txt
+transcript*.txt
+*.vtt
+sample_data/
