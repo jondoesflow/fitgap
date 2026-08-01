@@ -98,7 +98,10 @@ class Classifier:
         self.batch_size = batch_size
 
     def classify_workspace(
-        self, workspace: Workspace, force: bool = False
+        self,
+        workspace: Workspace,
+        force: bool = False,
+        on_progress=None,  # callable(done, total) for progress display
     ) -> tuple[int, list[str]]:
         """Classify requirements in place.
 
@@ -111,10 +114,16 @@ class Classifier:
             if force or r.classification is None
         ]
         classified = 0
+        done = 0
         missing: list[str] = []
+        if on_progress:
+            on_progress(0, len(todo))
         for start in range(0, len(todo), self.batch_size):
             batch = todo[start : start + self.batch_size]
             classified += self._classify_batch(batch, workspace)
+            done += len(batch)
+            if on_progress:
+                on_progress(done, len(todo))
         for requirement in todo:
             if requirement.classification is None:
                 missing.append(requirement.id)

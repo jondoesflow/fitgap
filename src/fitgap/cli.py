@@ -23,6 +23,31 @@ app = typer.Typer(
 )
 
 
+def _progress_bar():
+    """Live progress display with percentage and ETA (rich ships with typer)."""
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("eta"),
+        TimeRemainingColumn(),
+    )
+
+
 def _require_api_key() -> None:
     """Fail with clear guidance instead of an SDK traceback."""
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -101,11 +126,17 @@ def ingest(
 
         rules = load_rules(Path(config.redact_file))
         extractor = TranscriptExtractor(config, rules, anthropic.Anthropic())
-        typer.echo(
-            f"  Extracting implied requirements from {transcript_path.name} "
-            f"with {config.model}..."
-        )
-        items, events = extractor.extract(transcript_path)
+        with _progress_bar() as progress:
+            task = progress.add_task(
+                f"Extracting from {transcript_path.name} ({config.model})",
+                total=None,
+            )
+            items, events = extractor.extract(
+                transcript_path,
+                on_progress=lambda done, total: progress.update(
+                    task, completed=done, total=total
+                ),
+            )
         transcript_redactions.extend(events)
         typer.echo(
             f"  {transcript_path.name}: {len(items)} inferred requirement(s)"
@@ -221,8 +252,15 @@ def classify(
     classifier = Classifier(
         config, rules, anthropic.Anthropic(), batch_size=batch_size
     )
-    typer.echo(f"Classifying with {config.model}...")
-    classified, missing = classifier.classify_workspace(workspace, force=force)
+    with _progress_bar() as progress:
+        task = progress.add_task(f"Classifying ({config.model})", total=None)
+        classified, missing = classifier.classify_workspace(
+            workspace,
+            force=force,
+            on_progress=lambda done, total: progress.update(
+                task, completed=done, total=total
+            ),
+        )
     workspace.save(ws_path)
 
     counts = Counter(
@@ -285,11 +323,18 @@ def verify(
     rules = load_rules(Path(config.redact_file))
 
     verifier = Verifier(config, rules, anthropic.Anthropic())
-    typer.echo(
-        f"Verifying capability claims against Microsoft Learn "
-        f"({config.verify.mode} mode)..."
-    )
-    counts = verifier.verify_workspace(workspace, force=force)
+    with _progress_bar() as progress:
+        task = progress.add_task(
+            f"Verifying against Microsoft Learn ({config.verify.mode} mode)",
+            total=None,
+        )
+        counts = verifier.verify_workspace(
+            workspace,
+            force=force,
+            on_progress=lambda done, total: progress.update(
+                task, completed=done, total=total
+            ),
+        )
     workspace.save(ws_path)
 
     typer.echo(f"\n  Verified with live citation: {counts['verified']}")

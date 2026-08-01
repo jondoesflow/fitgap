@@ -192,7 +192,9 @@ class TranscriptExtractor:
         self.client = client
 
     def extract(
-        self, path: Path
+        self,
+        path: Path,
+        on_progress=None,  # callable(done, total) for progress display
     ) -> tuple[list[ParsedRequirement], list[RedactionEvent]]:
         cues = parse_transcript(path)
         if not cues:
@@ -200,7 +202,10 @@ class TranscriptExtractor:
         events: list[RedactionEvent] = []
         results: list[ParsedRequirement] = []
         seen_texts: set[str] = set()
-        for chunk in _chunk(cues):
+        chunks = _chunk(cues)
+        if on_progress:
+            on_progress(0, len(chunks))
+        for chunk_index, chunk in enumerate(chunks, start=1):
             lines = []
             for cue in chunk:
                 redacted_speaker, speaker_events = anonymise(cue.speaker, self.rules)
@@ -259,4 +264,6 @@ class TranscriptExtractor:
                         source_reliability=SourceReliability.INFERRED,
                     )
                 )
+            if on_progress:
+                on_progress(chunk_index, len(chunks))
         return results, events

@@ -119,31 +119,46 @@ class Verifier:
     # ------------------------------------------------------------------ API
 
     def verify_workspace(
-        self, workspace: Workspace, force: bool = False
+        self,
+        workspace: Workspace,
+        force: bool = False,
+        on_progress=None,  # callable(done, total) for progress display
     ) -> dict[str, int]:
         """Verify capability claims in place; returns counts by outcome."""
         counts = {"verified": 0, "unconfirmed": 0, "not_required": 0, "skipped": 0}
-        for req in workspace.requirements:
-            if req.classification is None:
-                counts["skipped"] += 1
-                continue
-            if req.classification.category not in CATEGORIES_REQUIRING_VERIFICATION:
-                req.verification = Verification(status=VerificationStatus.NOT_REQUIRED)
-                counts["not_required"] += 1
-                continue
-            already_verified = (
-                req.verification is not None
-                and req.verification.status == VerificationStatus.VERIFIED
-            )
-            if already_verified and not force:
-                counts["verified"] += 1
-                continue
-            req.verification = self._verify_requirement(req, workspace)
-            counts[
-                "verified"
-                if req.verification.status == VerificationStatus.VERIFIED
-                else "unconfirmed"
-            ] += 1
+        total = len(workspace.requirements)
+        if on_progress:
+            on_progress(0, total)
+        for done, req in enumerate(workspace.requirements, start=1):
+            try:
+                if req.classification is None:
+                    counts["skipped"] += 1
+                    continue
+                if (
+                    req.classification.category
+                    not in CATEGORIES_REQUIRING_VERIFICATION
+                ):
+                    req.verification = Verification(
+                        status=VerificationStatus.NOT_REQUIRED
+                    )
+                    counts["not_required"] += 1
+                    continue
+                already_verified = (
+                    req.verification is not None
+                    and req.verification.status == VerificationStatus.VERIFIED
+                )
+                if already_verified and not force:
+                    counts["verified"] += 1
+                    continue
+                req.verification = self._verify_requirement(req, workspace)
+                counts[
+                    "verified"
+                    if req.verification.status == VerificationStatus.VERIFIED
+                    else "unconfirmed"
+                ] += 1
+            finally:
+                if on_progress:
+                    on_progress(done, total)
         return counts
 
     # ------------------------------------------------------------- internals
