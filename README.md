@@ -52,7 +52,23 @@ cp redact.example.yaml redact.yaml
 
 Both real files are gitignored — client-specific settings never leave your machine.
 
-## Quickstart
+## Quickstart (Windows)
+
+The repo ships a session-setup script that does all of the below in one go — creates the venv on first run, activates it, creates `fitgap.yaml`/`redact.yaml` from the examples, and checks (or prompts for) your API key:
+
+```bash
+.\start-fitgap.ps1
+```
+
+Then just:
+
+```bash
+fitgap run -t Transcript.txt
+```
+
+(If PowerShell blocks the script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.)
+
+## Quickstart (manual)
 
 Generate sample inputs and run the full pipeline:
 
