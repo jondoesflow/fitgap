@@ -31,7 +31,9 @@ def version() -> None:
 @app.command()
 def ingest(
     paths: list[Path] = typer.Argument(
-        ..., help="Requirement sources: .docx and/or .xlsx files."
+        ...,
+        help="Requirement sources: .docx / .xlsx files, or the literal 'ado' "
+        "to pull work items from Azure DevOps (configured in fitgap.yaml).",
     ),
     config_path: Path = typer.Option(
         Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
@@ -49,6 +51,20 @@ def ingest(
     config_changed = False
 
     for path in paths:
+        if str(path).lower() == "ado":
+            from fitgap.ingest.ado import AdoError, fetch_ado_requirements
+
+            try:
+                items = fetch_ado_requirements(config.ado)
+            except AdoError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            typer.echo(
+                f"  Azure DevOps ({config.ado.organization}/{config.ado.project}): "
+                f"{len(items)} requirement(s)"
+            )
+            parsed.extend(items)
+            continue
         if not path.exists():
             typer.secho(f"Not found: {path}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
