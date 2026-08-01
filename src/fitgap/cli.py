@@ -44,11 +44,43 @@ def ingest(
     no_input: bool = typer.Option(
         False, "--no-input", help="Never prompt (fail if a column mapping is missing)."
     ),
+    transcripts: list[Path] = typer.Option(
+        [],
+        "--transcript",
+        "-t",
+        help="Workshop transcript (.vtt/.txt/.docx) — implied requirements are "
+        "extracted with the LLM and marked source_reliability: inferred. "
+        "Repeatable.",
+    ),
 ) -> None:
     """Parse requirement sources, deduplicate, and write the canonical workspace."""
     config = load_config(config_path)
     parsed: list[ParsedRequirement] = []
+    transcript_redactions = []
     config_changed = False
+
+    for transcript_path in transcripts:
+        if not transcript_path.exists():
+            typer.secho(
+                f"Not found: {transcript_path}", fg=typer.colors.RED, err=True
+            )
+            raise typer.Exit(code=1)
+        import anthropic
+
+        from fitgap.ingest.transcript import TranscriptExtractor
+
+        rules = load_rules(Path(config.redact_file))
+        extractor = TranscriptExtractor(config, rules, anthropic.Anthropic())
+        typer.echo(
+            f"  Extracting implied requirements from {transcript_path.name} "
+            f"with {config.model}..."
+        )
+        items, events = extractor.extract(transcript_path)
+        transcript_redactions.extend(events)
+        typer.echo(
+            f"  {transcript_path.name}: {len(items)} inferred requirement(s)"
+        )
+        parsed.extend(items)
 
     for path in paths:
         if str(path).lower() == "ado":
@@ -97,6 +129,7 @@ def ingest(
     merged_away = before - len(deduped)
 
     workspace = build_workspace(deduped)
+    workspace.redaction_log.extend(transcript_redactions)
     out_path = out or Path(config.output.workspace)
     workspace.save(out_path)
 
