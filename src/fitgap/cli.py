@@ -331,6 +331,138 @@ def report(
         )
 
 
+@app.command()
+def run(
+    paths: list[Path] = typer.Argument(
+        ..., help=".docx/.xlsx files and/or the literal 'ado'."
+    ),
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    transcripts: list[Path] = typer.Option(
+        [], "--transcript", "-t", help="Workshop transcripts (.vtt/.txt/.docx)."
+    ),
+    no_input: bool = typer.Option(False, "--no-input"),
+    skip_verify: bool = typer.Option(
+        False, "--skip-verify", help="Skip Learn verification (claims stay UNCONFIRMED)."
+    ),
+) -> None:
+    """Full pipeline: ingest -> classify -> verify -> report."""
+    ingest(
+        paths=paths,
+        config_path=config_path,
+        out=None,
+        no_input=no_input,
+        transcripts=transcripts,
+    )
+    typer.echo("")
+    classify(config_path=config_path, workspace_path=None, batch_size=10, force=False)
+    typer.echo("")
+    if skip_verify:
+        typer.secho(
+            "Verification skipped — all capability claims will read "
+            "'UNCONFIRMED — validate manually' in the register.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        verify(config_path=config_path, workspace_path=None, force=False)
+        typer.echo("")
+    report(config_path=config_path, workspace_path=None, out=None)
+
+
+@app.command("eval")
+def eval_cmd(
+    golden_path: Path = typer.Option(
+        Path("golden/golden_set.yaml"), "--golden", help="Golden set YAML."
+    ),
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    verify_citations: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help="Also run Learn verification and re-check every asserted citation.",
+    ),
+    out: Path | None = typer.Option(
+        None, "--out", help="Optionally save the evaluated workspace JSON."
+    ),
+) -> None:
+    """Run the pipeline against the golden set and score it against the gates."""
+    import anthropic
+
+    from fitgap.classify import Classifier
+    from fitgap.evaluate import (
+        ACCURACY_GATE,
+        golden_workspace,
+        load_golden_set,
+        score_citations,
+        score_classifications,
+    )
+    from fitgap.redact import RedactionRules
+
+    if not golden_path.exists():
+        typer.secho(f"Golden set not found: {golden_path}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    config = load_config(config_path)
+    golden = load_golden_set(golden_path)
+    workspace = golden_workspace(golden)
+    client = anthropic.Anthropic()
+
+    typer.echo(
+        f"Classifying {len(golden.requirements)} golden requirements with "
+        f"{config.model}..."
+    )
+    # Golden set text is synthetic — no redaction rules needed.
+    classifier = Classifier(config, RedactionRules(redact_emails=False), client)
+    classifier.classify_workspace(workspace)
+
+    result = score_classifications(golden, workspace)
+
+    if verify_citations:
+        from fitgap.verify import Verifier
+
+        typer.echo("Verifying capability claims against Microsoft Learn...")
+        Verifier(config, RedactionRules(redact_emails=False), client).verify_workspace(
+            workspace
+        )
+        result = score_citations(workspace, result)
+
+    if out:
+        workspace.save(out)
+        typer.echo(f"Evaluated workspace saved to {out}")
+
+    typer.echo(
+        f"\nClassification accuracy: {result.correct}/{result.total} "
+        f"({result.accuracy:.0%}) — gate {ACCURACY_GATE:.0%}"
+    )
+    for category, score in sorted(result.by_category.items()):
+        typer.echo(f"  {category}: {score.correct}/{score.total}")
+    if result.mismatches:
+        typer.echo("\nMismatches:")
+        for req_id, expected, actual in result.mismatches:
+            typer.secho(
+                f"  {req_id}: expected '{expected}', got '{actual}'",
+                fg=typer.colors.YELLOW,
+            )
+    if verify_citations:
+        typer.echo(
+            f"\nCitation integrity: {result.citations_resolving}/"
+            f"{result.citations_checked} asserted citations resolve live "
+            f"(gate: 100%)"
+        )
+        for req_id, url in result.dead_citations:
+            typer.secho(f"  DEAD CITATION {req_id}: {url}", fg=typer.colors.RED)
+
+    if result.gates_met:
+        typer.secho("\nGATES MET — ready for real projects.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            "\nGATES NOT MET — do not use on real projects yet.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     app()
 

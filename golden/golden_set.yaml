@@ -1,0 +1,188 @@
+# Golden evaluation set — 25 hand-verified fit-gap classifications.
+#
+# `expected` is the reference answer; `acceptable` lists alternatives a
+# competent architect could defensibly choose (scored as correct).
+# Spread: easy OOB, configuration, Power Platform extension, deceptive
+# requirements that SOUND out-of-the-box but are not, deprecated-feature
+# traps, genuine gaps, and unclear requirements.
+#
+# Gate: >= 90% classification accuracy, and 100% of verified citations must
+# resolve live. Do not tune the classifier prompt against individual entries.
+
+requirements:
+  # ---------- Easy Fit — OOB ----------
+  - id: GS-001
+    text: Sales users must be able to qualify a lead and have an opportunity created automatically.
+    functional_area: Sales
+    expected: "Fit — OOB"
+    notes: Core lead-to-opportunity qualification flow in Dynamics 365 Sales.
+
+  - id: GS-002
+    text: Service agents must manage support cases from creation through resolution with status tracking.
+    functional_area: Customer Service
+    expected: "Fit — OOB"
+    notes: Core case management in Dynamics 365 Customer Service.
+
+  - id: GS-003
+    text: Users must be able to track email correspondence with customers against the customer record from Outlook.
+    functional_area: Platform/Dataverse
+    expected: "Fit — OOB"
+    acceptable: ["Fit — Configuration"]
+    notes: App for Outlook + server-side sync; enabling it is arguably configuration.
+
+  - id: GS-004
+    text: Sales managers need a dashboard showing open pipeline by owner and sales stage.
+    functional_area: Sales
+    expected: "Fit — OOB"
+    acceptable: ["Fit — Configuration"]
+    notes: Standard dashboards/charts; a tailored dashboard is light configuration.
+
+  - id: GS-005
+    text: Dispatchers must schedule field service work orders to technicians using a drag-and-drop schedule board.
+    functional_area: Field Service
+    expected: "Fit — OOB"
+    notes: Field Service schedule board.
+
+  - id: GS-006
+    text: Agents need a searchable knowledge base with article versioning to resolve cases faster.
+    functional_area: Customer Service
+    expected: "Fit — OOB"
+    notes: Knowledge management in Customer Service.
+
+  # ---------- Fit — Configuration ----------
+  - id: GS-007
+    text: The opportunity sales process must follow our five internal stages with mandatory fields at each stage.
+    functional_area: Sales
+    expected: "Fit — Configuration"
+    notes: Custom business process flow with step requirements.
+
+  - id: GS-008
+    text: Only the finance team may view the credit-limit and payment-terms fields on the account record.
+    functional_area: Security
+    expected: "Fit — Configuration"
+    notes: Dataverse column-level security profiles.
+
+  - id: GS-009
+    text: High-priority cases must have a 4-hour first-response SLA with escalation when breached.
+    functional_area: Customer Service
+    expected: "Fit — Configuration"
+    notes: SLAs and SLA KPIs; escalation actions configurable.
+
+  - id: GS-010
+    text: Incoming cases must be automatically routed to the right queue based on product line and severity.
+    functional_area: Customer Service
+    expected: "Fit — Configuration"
+    notes: Unified routing / routing rule sets.
+
+  - id: GS-011
+    text: The sales team and the service team must each see role-tailored forms and views of the account record.
+    functional_area: Platform/Dataverse
+    expected: "Fit — Configuration"
+    notes: Multiple forms/views with security-role targeting.
+
+  - id: GS-012
+    text: The system must warn users when they try to create an account that already exists.
+    functional_area: Platform/Dataverse
+    expected: "Fit — Configuration"
+    acceptable: ["Fit — OOB"]
+    notes: Duplicate detection rules — enabled/authored via configuration.
+
+  # ---------- Extend — Power Platform ----------
+  - id: GS-013
+    text: Discounts above 20 percent must go through a two-level approval before the quote can be activated.
+    functional_area: Sales
+    expected: "Extend — Power Platform"
+    notes: Power Automate approvals; not achievable with configuration alone.
+
+  - id: GS-014
+    text: Customers must be able to log and track their own support cases through a branded self-service web portal.
+    functional_area: Customer Service
+    expected: "Extend — Power Platform"
+    notes: Power Pages with Dataverse case integration.
+
+  - id: GS-015
+    text: Warehouse staff need a simple mobile app to scan product barcodes and update stock check records in Dataverse.
+    functional_area: Platform/Dataverse
+    expected: "Extend — Power Platform"
+    notes: Canvas app with barcode scanner control.
+
+  - id: GS-016
+    text: Sales managers must receive a weekly summary email listing all opportunities with no activity in 14 days.
+    functional_area: Sales
+    expected: "Extend — Power Platform"
+    notes: Scheduled Power Automate flow; not OOB.
+
+  - id: GS-017
+    text: The account form must display sites on an interactive map with clustering and colour-coded pins.
+    functional_area: Platform/Dataverse
+    expected: "Extend — Power Platform"
+    notes: PCF control (or embedded canvas app with map control).
+
+  # ---------- Deceptive — sound OOB but are not ----------
+  - id: GS-018
+    text: The system must automatically generate complex multi-page contract documents with conditional clauses and dynamic pricing tables from opportunity data.
+    functional_area: Sales
+    expected: "Gap — ISV"
+    acceptable: ["Extend — Power Platform"]
+    notes: >
+      Sounds like Word templates, but conditional clauses and dynamic tables
+      exceed them; document-generation ISVs are the defensible first answer.
+
+  - id: GS-019
+    text: Users must be able to place and receive phone calls inside Dynamics 365 with automatic call recording, without any third-party telephony service.
+    functional_area: Customer Service
+    expected: "Gap — ISV"
+    acceptable: ["Out of scope / unclear"]
+    notes: >
+      No native PSTN telephony in D365 CE; CTI requires an ISV/telephony
+      provider — the "without any third-party service" constraint cannot be met.
+
+  - id: GS-020
+    text: Users must be able to roll back any record to a previous version with one click, restoring all field values.
+    functional_area: Platform/Dataverse
+    expected: "Gap — Custom"
+    acceptable: ["Extend — Power Platform"]
+    notes: >
+      Auditing captures history but there is no one-click restore; rebuilding
+      state from audit logs is development work.
+
+  - id: GS-021
+    text: Marketing must build automated email nurture campaigns using the outbound marketing module in Dynamics 365 Marketing.
+    functional_area: Marketing/CI-Journeys
+    expected: "Fit — OOB"
+    acceptable: ["Fit — Configuration", "Out of scope / unclear"]
+    notes: >
+      Deprecated-feature trap. The need is met OOB by Customer Insights -
+      Journeys real-time journeys, but outbound marketing as named is
+      deprecated — verification must surface the deprecation/transition, and a
+      classifier asking for clarification is defensible.
+
+  # ---------- Genuine gaps ----------
+  - id: GS-022
+    text: Confirmed sales orders must post to our bespoke on-premise ERP within five minutes, including custom credit-check callbacks before acceptance.
+    functional_area: Integration
+    expected: "Gap — Custom"
+    notes: Bespoke ERP, latency, and synchronous callbacks demand pro-code integration.
+
+  - id: GS-023
+    text: The system must calculate commissions using our proprietary multi-tier formula with retroactive adjustments and clawbacks across fiscal years.
+    functional_area: Sales
+    expected: "Gap — Custom"
+    acceptable: ["Gap — ISV"]
+    notes: Complex incentive-compensation logic; ISV (e.g. commission engines) or custom.
+
+  # ---------- Out of scope / unclear ----------
+  - id: GS-024
+    text: The new CRM should be much easier to use than the current system.
+    functional_area: Other
+    expected: "Out of scope / unclear"
+    notes: Not testable as written; needs elaboration into concrete requirements.
+
+  - id: GS-025
+    text: The platform should use AI to make the sales team more effective.
+    functional_area: Other
+    expected: "Out of scope / unclear"
+    acceptable: ["Fit — OOB"]
+    notes: >
+      Vague as written and needs clarification; an architect pointing at
+      Sales Copilot capabilities is a defensible alternative reading.
