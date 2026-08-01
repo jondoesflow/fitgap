@@ -50,9 +50,10 @@ def version() -> None:
 @app.command()
 def ingest(
     paths: list[Path] = typer.Argument(
-        ...,
+        None,
         help="Requirement sources: .docx / .xlsx files, or the literal 'ado' "
-        "to pull work items from Azure DevOps (configured in fitgap.yaml).",
+        "to pull work items from Azure DevOps (configured in fitgap.yaml). "
+        "May be omitted when using --transcript.",
     ),
     config_path: Path = typer.Option(
         Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
@@ -73,6 +74,15 @@ def ingest(
     ),
 ) -> None:
     """Parse requirement sources, deduplicate, and write the canonical workspace."""
+    paths = paths or []
+    if not paths and not transcripts:
+        typer.secho(
+            "No sources given. Pass .docx/.xlsx files, 'ado', and/or "
+            "--transcript <file>.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
     config = load_config(config_path)
     parsed: list[ParsedRequirement] = []
     transcript_redactions = []
@@ -356,7 +366,9 @@ def report(
 @app.command()
 def run(
     paths: list[Path] = typer.Argument(
-        ..., help=".docx/.xlsx files and/or the literal 'ado'."
+        None,
+        help=".docx/.xlsx files and/or the literal 'ado'. "
+        "May be omitted when using --transcript.",
     ),
     config_path: Path = typer.Option(
         Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
