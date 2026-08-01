@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -20,6 +21,24 @@ app = typer.Typer(
     help="Fit-gap analysis assistant for D365 CE / Power Platform consultants.",
     no_args_is_help=True,
 )
+
+
+def _require_api_key() -> None:
+    """Fail with clear guidance instead of an SDK traceback."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+    typer.secho(
+        "ANTHROPIC_API_KEY is not set — this stage calls the Anthropic API.\n"
+        "Set it for this session:\n"
+        '  PowerShell:   $env:ANTHROPIC_API_KEY = "sk-ant-..."\n'
+        '  bash/zsh:     export ANTHROPIC_API_KEY="sk-ant-..."\n'
+        "Or persist it on Windows:\n"
+        '  setx ANTHROPIC_API_KEY "sk-ant-..."   (then open a new terminal)\n'
+        "Keys: https://console.anthropic.com/settings/keys",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
 
 
 @app.command()
@@ -65,6 +84,7 @@ def ingest(
                 f"Not found: {transcript_path}", fg=typer.colors.RED, err=True
             )
             raise typer.Exit(code=1)
+        _require_api_key()
         import anthropic
 
         from fitgap.ingest.transcript import TranscriptExtractor
@@ -164,6 +184,7 @@ def classify(
     ),
 ) -> None:
     """Classify each requirement against the fit-gap taxonomy (uses the Anthropic API)."""
+    _require_api_key()
     import anthropic
 
     from fitgap.classify import Classifier
@@ -236,6 +257,7 @@ def verify(
     ),
 ) -> None:
     """Verify every capability claim against live Microsoft Learn documentation."""
+    _require_api_key()
     import anthropic
 
     from fitgap.verify import Verifier
@@ -388,6 +410,7 @@ def eval_cmd(
     ),
 ) -> None:
     """Run the pipeline against the golden set and score it against the gates."""
+    _require_api_key()
     import anthropic
 
     from fitgap.classify import Classifier
