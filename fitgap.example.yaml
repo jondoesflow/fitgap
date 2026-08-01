@@ -1,7 +1,12 @@
 # fitgap configuration — copy to fitgap.yaml and edit.
 # fitgap.yaml is gitignored so client-specific settings stay local.
 
-model: claude-sonnet-4-6
+# Active LLM provider/model — set with `fitgap model use <provider>/<model>`.
+# The provider choice is a per-engagement compliance decision; API keys are
+# never stored here (env var / OS keyring / gitignored .env — see README).
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6
 
 # Anonymisation rules applied before any text is sent to an external API.
 redact_file: redact.yaml
