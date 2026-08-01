@@ -174,6 +174,47 @@ def classify(
     typer.echo(f"Workspace updated: {ws_path}")
 
 
+@app.command()
+def report(
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    workspace_path: Path | None = typer.Option(
+        None, "--workspace", "-w", help="Workspace JSON (default from config)."
+    ),
+    out: Path | None = typer.Option(
+        None, "--out", "-o", help="Register .xlsx output (default from config)."
+    ),
+) -> None:
+    """Generate the Excel fit-gap register from the workspace."""
+    from fitgap.report import generate_register
+
+    config = load_config(config_path)
+    ws_path = workspace_path or Path(config.output.workspace)
+    if not ws_path.exists():
+        typer.secho(
+            f"Workspace not found: {ws_path} — run 'fitgap ingest' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    workspace = Workspace.load(ws_path)
+    out_path = out or Path(config.output.register_path)
+    generate_register(workspace, config, out_path)
+
+    unclassified = sum(1 for r in workspace.requirements if r.classification is None)
+    typer.echo(
+        f"Register written to {out_path} "
+        f"({len(workspace.requirements)} requirement(s))."
+    )
+    if unclassified:
+        typer.secho(
+            f"Warning: {unclassified} requirement(s) unclassified — "
+            "run 'fitgap classify' for a complete register.",
+            fg=typer.colors.YELLOW,
+        )
+
+
 def main() -> None:
     app()
 
