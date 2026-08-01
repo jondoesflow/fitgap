@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 import requests
 
 from fitgap.config import Config
+from fitgap.llm import UnsupportedFeatureError, as_llm_client
+from fitgap.llm.anthropic_client import LEARN_MCP_URL, MCP_BETA  # noqa: F401 (re-export)
 from fitgap.models import (
     CATEGORIES_REQUIRING_VERIFICATION,
     Requirement,
@@ -32,9 +34,6 @@ from fitgap.models import (
     Workspace,
 )
 from fitgap.redact import RedactionRules, anonymise
-
-LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
-MCP_BETA = "mcp-client-2025-04-04"
 
 VERIFY_SYSTEM_PROMPT = """\
 You verify claims about Microsoft Dynamics 365 and Power Platform capabilities \
@@ -108,13 +107,13 @@ class Verifier:
         self,
         config: Config,
         rules: RedactionRules,
-        client,  # anthropic.Anthropic or a test double
+        client,  # fitgap.llm.LLMClient, anthropic.Anthropic, or a test double
         url_checker: Callable[[str], UrlCheckResult] = check_learn_url,
         usage_tracker=None,  # fitgap.usage.UsageTracker
     ) -> None:
         self.config = config
         self.rules = rules
-        self.client = client
+        self.llm = as_llm_client(client, model=config.model)
         self.url_checker = url_checker
         self.usage_tracker = usage_tracker
 
@@ -180,7 +179,18 @@ class Verifier:
             f"Requirement it must satisfy: {redacted_text}\n"
         )
         try:
-            raw = self._call_model(user_prompt)
+            raw = self.llm.learn_search(
+                system=VERIFY_SYSTEM_PROMPT,
+                user=user_prompt,
+                mode=self.config.verify.mode,
+                max_tokens=2048,
+                stage="verify",
+                tracker=self.usage_tracker,
+            )
+        except UnsupportedFeatureError:
+            # The provider simply cannot do live Learn search — surface it
+            # instead of silently marking every row UNCONFIRMED.
+            raise
         except Exception as exc:  # API failure must downgrade, never fabricate
             return Verification(
                 status=VerificationStatus.UNCONFIRMED,
@@ -221,47 +231,8 @@ class Verifier:
             notes=result.get("notes"),
         )
 
-    def _call_model(self, user_prompt: str) -> list:
-        if self.config.verify.mode == "mcp":
-            response = self.client.beta.messages.create(
-                model=self.config.model,
-                max_tokens=2048,
-                system=VERIFY_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                mcp_servers=[
-                    {
-                        "type": "url",
-                        "url": LEARN_MCP_URL,
-                        "name": "microsoft-learn",
-                    }
-                ],
-                betas=[MCP_BETA],
-            )
-        else:  # web_search fallback, locked to learn.microsoft.com
-            response = self.client.messages.create(
-                model=self.config.model,
-                max_tokens=2048,
-                system=VERIFY_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                tools=[
-                    {
-                        "type": "web_search_20250305",
-                        "name": "web_search",
-                        "max_uses": 5,
-                        "allowed_domains": ["learn.microsoft.com"],
-                    }
-                ],
-            )
-        if self.usage_tracker:
-            self.usage_tracker.record("verify", response)
-        return response.content
-
     @staticmethod
-    def _parse_result(content_blocks: list) -> dict | None:
-        text = ""
-        for block in content_blocks:
-            if getattr(block, "type", None) == "text":
-                text = block.text  # last text block wins
+    def _parse_result(text: str) -> dict | None:
         text = text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text, flags=re.IGNORECASE)

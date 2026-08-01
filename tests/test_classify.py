@@ -150,10 +150,13 @@ def test_invalid_category_fails_loudly():
             )
         ]
 
-    with pytest.raises(ClassificationError, match="REQ-001"):
-        Classifier(Config(), RULES, FakeAnthropic(responder)).classify_workspace(
-            make_workspace(1)
-        )
+    # Schema validation catches the bad enum, retries once (repair), then
+    # fails loudly with an error naming the model and the offending value.
+    fake = FakeAnthropic(responder)
+    with pytest.raises(ClassificationError, match="claude-sonnet-4-6") as excinfo:
+        Classifier(Config(), RULES, fake).classify_workspace(make_workspace(1))
+    assert "Fits nicely" in str(excinfo.value)
+    assert len(fake.calls) == 2  # original attempt + one repair retry
 
 
 def test_missing_tool_call_fails_loudly():
