@@ -9,7 +9,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.12+ required. Runtime dependencies are deliberately minimal: `typer`, `pydantic`, `python-docx`, `openpyxl`, `anthropic`, `requests`, `pyyaml`, `rapidfuzz`. Dev-only: `pytest`. **Do not add dependencies without discussion.**
+Python 3.12+ required. Runtime dependencies are deliberately minimal: `typer`, `pydantic`, `python-docx`, `openpyxl`, `anthropic`, `openai` (drives every OpenAI-compatible provider), `requests`, `pyyaml`, `ruamel.yaml` (comment-preserving config writes), `keyring`, `rapidfuzz`. Dev-only: `pytest`. **Do not add dependencies without discussion.**
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Key boundaries:
 
 ## Testing strategy
 
-All tests run **offline** — the Anthropic client is replaced by `tests/fakes.py::FakeAnthropic`, whose `responder(kwargs) -> content blocks` contract makes it trivial to script model behaviour per test (including tool-refusal, hallucinated IDs, and garbage output). The same fake serves `client.messages` and `client.beta.messages` (MCP calls).
+All tests run **offline** — the Anthropic client is replaced by `tests/fakes.py::FakeAnthropic`, whose `responder(kwargs) -> content blocks` contract makes it trivial to script model behaviour per test (including tool-refusal, hallucinated IDs, and garbage output). The same fake serves `client.messages` and `client.beta.messages` (MCP calls). `tests/fakes.py::FakeOpenAI` plays the same role for the OpenAI-compatible providers (OpenAI, DeepSeek, Kimi, Gemini, Mistral, xAI), and all pipeline stages consume the `fitgap.llm.LLMClient` interface rather than any SDK directly.
 
 - Parser fixtures (`.docx`, `.xlsx`, `.vtt`) are **generated programmatically** in `tests/conftest.py` — no binaries in the repo.
 - `tests/test_verify.py::test_fake_feature_citation_is_downgraded` is the guard-rail test required by the spec: a confirmed-sounding answer with a citation that fails the liveness check must come back UNCONFIRMED with no stored URL.

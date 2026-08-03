@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fitgap.classify.classifier import ClassificationError
 from fitgap.config import Config
+from fitgap.llm import StructuredOutputError, as_llm_client
 from fitgap.models import (
     FunctionalArea,
     ParsedRequirement,
@@ -191,7 +192,7 @@ class TranscriptExtractor:
     ) -> None:
         self.config = config
         self.rules = rules
-        self.client = client
+        self.llm = as_llm_client(client, model=config.model)
         self.usage_tracker = usage_tracker
 
     def extract(
@@ -220,34 +221,22 @@ class TranscriptExtractor:
                 lines.append(f"{prefix}{who}{redacted_text}")
             transcript_block = "\n".join(lines)
 
-            response = self.client.messages.create(
-                model=self.config.model,
-                max_tokens=4096,
-                system=EXTRACT_SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Extract the implied business requirements from this "
-                            "transcript chunk:\n\n" + transcript_block
-                        ),
-                    }
-                ],
-                tools=[EXTRACT_TOOL],
-                tool_choice={"type": "tool", "name": "record_extracted_requirements"},
-            )
-            if self.usage_tracker:
-                self.usage_tracker.record("extract", response)
-            tool_input = None
-            for block in response.content:
-                if getattr(block, "type", None) == "tool_use":
-                    tool_input = block.input
-                    break
-            if tool_input is None:
-                raise ClassificationError(
-                    "Model response contained no record_extracted_requirements "
-                    "tool call."
+            try:
+                tool_input = self.llm.structured(
+                    system=EXTRACT_SYSTEM_PROMPT,
+                    user=(
+                        "Extract the implied business requirements from this "
+                        "transcript chunk:\n\n" + transcript_block
+                    ),
+                    tool_name=EXTRACT_TOOL["name"],
+                    tool_description=EXTRACT_TOOL["description"],
+                    schema=EXTRACT_TOOL["input_schema"],
+                    max_tokens=4096,
+                    stage="extract",
+                    tracker=self.usage_tracker,
                 )
+            except StructuredOutputError as exc:
+                raise ClassificationError(str(exc)) from exc
             for entry in tool_input.get("requirements", []):
                 text = (entry.get("text") or "").strip()
                 if len(text) < 10 or text.lower() in seen_texts:

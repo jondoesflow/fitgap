@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import Counter
 from pathlib import Path
 
@@ -10,9 +9,10 @@ import typer
 
 from fitgap import __version__
 from fitgap.api_errors import api_guard
-from fitgap.config import load_config, save_config
+from fitgap.config import Config, load_config, save_config
 from fitgap.ingest.docx_parser import parse_docx
 from fitgap.ingest.xlsx_parser import parse_xlsx, resolve_mapping
+from fitgap.model_cli import model_app
 from fitgap.models import (
     ParsedRequirement,
     SourceReliability,
@@ -28,13 +28,23 @@ app = typer.Typer(
     help="Fit-gap analysis assistant for D365 CE / Power Platform consultants.",
     no_args_is_help=True,
 )
+app.add_typer(model_app)
 
 
-def _print_cost(tracker: UsageTracker | None, model: str, title: str) -> None:
+def _provider_label(config: Config) -> str:
+    from fitgap.llm.registry import PROVIDERS
+
+    spec = PROVIDERS.get(config.llm.provider)
+    return spec.label if spec else config.llm.provider
+
+
+def _print_cost(tracker: UsageTracker | None, config: Config, title: str) -> None:
     if tracker is None or not tracker.stages:
         return
     typer.secho(f"\n{title}", fg=typer.colors.CYAN)
-    for line in tracker.summary_lines(model):
+    # Compliance: the run summary always names the provider that received data.
+    typer.echo(f"  provider: {_provider_label(config)} ({config.llm.model})")
+    for line in tracker.summary_lines(config.model):
         typer.echo(line)
 
 
@@ -63,13 +73,13 @@ def _progress_bar():
     )
 
 
-def _validate_api_key(key: str) -> None:
+def _validate_api_key(key: str, env_var: str, source: str, keys_url: str) -> None:
     """Reject keys that cannot be sent as an HTTP header.
 
     A control or non-ASCII character in the key survives httpx's own checks
-    when it sits mid-value, and is then rejected at Anthropic's Cloudflare edge
-    as a malformed request: HTTP 400 with an *empty* body and no request-id.
-    That is impossible to diagnose from the SDK error, so catch it here.
+    when it sits mid-value, and is then rejected at the provider's edge as a
+    malformed request: HTTP 400 with an *empty* body and no request-id. That
+    is impossible to diagnose from the SDK error, so catch it here.
 
     Only positions and code points are reported — never key material.
     """
@@ -82,13 +92,13 @@ def _validate_api_key(key: str) -> None:
         return
     detail = ", ".join(f"index {i} = U+{cp:04X}" for i, cp in bad[:10])
     typer.secho(
-        "ANTHROPIC_API_KEY contains character(s) that are not valid in an HTTP "
-        f"header: {detail}\n"
+        f"The API key from {source} contains character(s) that are not valid "
+        f"in an HTTP header: {detail}\n"
         f"(key length {len(key)}; the value itself is not shown)\n\n"
         "The key was probably corrupted by a copy-paste or by how it was "
-        "stored. Re-copy it from\n"
-        "https://console.anthropic.com/settings/keys and set it again:\n"
-        '  setx ANTHROPIC_API_KEY "sk-ant-..."   (then open a NEW terminal)\n'
+        f"stored. Re-copy it from\n{keys_url} and set it again:\n"
+        f'  env var:   export {env_var}="..."  (PowerShell: $env:{env_var} = "...")\n'
+        "  or store:  fitgap model key <provider>\n"
         "Without this check the request fails as an opaque HTTP 400 with an "
         "empty body.",
         fg=typer.colors.RED,
@@ -97,20 +107,66 @@ def _validate_api_key(key: str) -> None:
     raise typer.Exit(code=1)
 
 
-def _require_api_key() -> None:
-    """Fail with clear guidance instead of an SDK traceback."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        _validate_api_key(key)
-        return
+def _build_llm(config: Config, config_path: Path):
+    """Resolve the active provider's API key and build its client.
+
+    Fails with clear guidance (naming the exact env var and the ``model key``
+    command) instead of an SDK traceback, and announces the provider so
+    nobody sends client-derived content somewhere they didn't consciously
+    choose."""
+    from fitgap.llm.factory import make_client
+    from fitgap.llm.keys import resolve_key
+    from fitgap.llm.registry import UnknownProviderError, get_provider
+
+    try:
+        spec = get_provider(config.llm.provider)
+    except UnknownProviderError as exc:
+        typer.secho(
+            f"{exc.args[0]} Fix the llm.provider value in fitgap.yaml or run "
+            "'fitgap model use <provider>/<model>'.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    resolved = resolve_key(spec, config_path.parent)
+    if resolved.key is None:
+        typer.secho(
+            f"No API key found for the active provider '{spec.name}' "
+            f"({spec.label}) — this stage sends redacted requirement text to "
+            f"{spec.label}.\n"
+            f"Set the environment variable {spec.env_var}:\n"
+            f'  PowerShell:   $env:{spec.env_var} = "..."\n'
+            f'  bash/zsh:     export {spec.env_var}="..."\n'
+            f"or store it once with:  fitgap model key {spec.name}\n"
+            f"Keys: {spec.keys_url}\n"
+            "No key needed for the offline stages: 'fitgap ingest' (without "
+            "--transcript) and 'fitgap report' work fully offline.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    _validate_api_key(resolved.key, spec.env_var, resolved.source, spec.keys_url)
     typer.secho(
-        "ANTHROPIC_API_KEY is not set — this stage calls the Anthropic API.\n"
-        "Set it for this session:\n"
-        '  PowerShell:   $env:ANTHROPIC_API_KEY = "sk-ant-..."\n'
-        '  bash/zsh:     export ANTHROPIC_API_KEY="sk-ant-..."\n'
-        "Or persist it on Windows:\n"
-        '  setx ANTHROPIC_API_KEY "sk-ant-..."   (then open a new terminal)\n'
-        "Keys: https://console.anthropic.com/settings/keys",
+        f"LLM provider: {spec.label} ({config.llm.model}) — redacted content "
+        f"will be sent to {spec.label} (key from {resolved.source}).",
+        fg=typer.colors.MAGENTA,
+    )
+    return make_client(spec.name, config.llm.model, resolved.key)
+
+
+def _require_learn_search(config: Config) -> None:
+    """The verify stage needs Anthropic-only live-search API features."""
+    from fitgap.llm.registry import PROVIDERS
+
+    spec = PROVIDERS.get(config.llm.provider)
+    if spec is None or spec.supports_learn_search:
+        return  # unknown provider fails later in _build_llm with guidance
+    typer.secho(
+        "'fitgap verify' needs live Microsoft Learn search, which uses "
+        "Anthropic-only API features (MCP connector / web search). Active "
+        f"provider: {spec.name}.\n"
+        "Either switch for the verify stage:  fitgap model use anthropic/claude-sonnet-4-6\n"
+        "or skip verification with --skip-verify (claims stay UNCONFIRMED).",
         fg=typer.colors.RED,
         err=True,
     )
@@ -171,14 +227,13 @@ def ingest(
                 f"Not found: {transcript_path}", fg=typer.colors.RED, err=True
             )
             raise typer.Exit(code=1)
-        _require_api_key()
-        import anthropic
-
+    llm_client = _build_llm(config, config_path) if transcripts else None
+    for transcript_path in transcripts:
         from fitgap.ingest.transcript import TranscriptExtractor
 
         rules = load_rules(Path(config.redact_file))
         extractor = TranscriptExtractor(
-            config, rules, anthropic.Anthropic(), usage_tracker=tracker
+            config, rules, llm_client, usage_tracker=tracker
         )
         with api_guard("transcript extraction"), _progress_bar() as progress:
             task = progress.add_task(
@@ -263,7 +318,7 @@ def ingest(
     if inferred:
         typer.echo(f"  transcript-inferred (double-check these): {inferred}")
     typer.echo(f"Workspace written to {out_path}")
-    _print_cost(tracker, config.model, "Claude API cost (ingest):")
+    _print_cost(tracker, config, "LLM usage (ingest):")
     return tracker
 
 
@@ -280,13 +335,11 @@ def classify(
         False, "--force", help="Re-classify requirements that already have a result."
     ),
 ) -> None:
-    """Classify each requirement against the fit-gap taxonomy (uses the Anthropic API)."""
-    _require_api_key()
-    import anthropic
-
+    """Classify each requirement against the fit-gap taxonomy (uses the configured LLM provider)."""
     from fitgap.classify import Classifier
 
     config = load_config(config_path)
+    llm_client = _build_llm(config, config_path)
     ws_path = workspace_path or Path(config.output.workspace)
     if not ws_path.exists():
         typer.secho(
@@ -309,7 +362,7 @@ def classify(
     classifier = Classifier(
         config,
         rules,
-        anthropic.Anthropic(),
+        llm_client,
         batch_size=batch_size,
         usage_tracker=tracker,
     )
@@ -351,7 +404,7 @@ def classify(
     if redacted:
         typer.echo(f"Redaction log entries: {redacted}")
     typer.echo(f"Workspace updated: {ws_path}")
-    _print_cost(tracker, config.model, "Claude API cost (classify):")
+    _print_cost(tracker, config, "LLM usage (classify):")
     return tracker
 
 
@@ -368,12 +421,11 @@ def verify(
     ),
 ) -> None:
     """Verify every capability claim against live Microsoft Learn documentation."""
-    _require_api_key()
-    import anthropic
-
     from fitgap.verify import Verifier
 
     config = load_config(config_path)
+    _require_learn_search(config)
+    llm_client = _build_llm(config, config_path)
     ws_path = workspace_path or Path(config.output.workspace)
     if not ws_path.exists():
         typer.secho(
@@ -386,7 +438,7 @@ def verify(
     rules = load_rules(Path(config.redact_file))
 
     tracker = UsageTracker()
-    verifier = Verifier(config, rules, anthropic.Anthropic(), usage_tracker=tracker)
+    verifier = Verifier(config, rules, llm_client, usage_tracker=tracker)
     with api_guard("verify"), _progress_bar() as progress:
         task = progress.add_task(
             f"Verifying against Microsoft Learn ({config.verify.mode} mode)",
@@ -402,6 +454,11 @@ def verify(
     workspace.save(ws_path)
 
     typer.echo(f"\n  Verified with live citation: {counts['verified']}")
+    if counts.get("reused"):
+        typer.echo(
+            f"  Duplicate claims shared an existing result "
+            f"(API calls saved): {counts['reused']}"
+        )
     if counts["unconfirmed"]:
         typer.secho(
             f"  UNCONFIRMED — validate manually: {counts['unconfirmed']}",
@@ -429,7 +486,7 @@ def verify(
             f"  DEPRECATED features relied on: {deprecated}", fg=typer.colors.RED
         )
     typer.echo(f"Workspace updated: {ws_path}")
-    _print_cost(tracker, config.model, "Claude API cost (verify):")
+    _print_cost(tracker, config, "LLM usage (verify):")
     return tracker
 
 
@@ -454,12 +511,11 @@ def benchmark_verify(
 
     The workspace is never modified.
     """
-    _require_api_key()
-    import anthropic
-
     from fitgap.verify import Verifier
 
     config = load_config(config_path)
+    _require_learn_search(config)  # live Learn search is Anthropic-only
+    llm_client = _build_llm(config, config_path)
     ws_path = workspace_path or Path(config.output.workspace)
     if not ws_path.exists():
         typer.secho(
@@ -510,8 +566,10 @@ def benchmark_verify(
         for key, value in overrides.items():
             setattr(variant_config.verify, key, value)
         tracker = UsageTracker()
+        # One client serves all variants: the per-variant model override flows
+        # through verify.model inside the Learn-search call.
         verifier = Verifier(
-            variant_config, rules, anthropic.Anthropic(), usage_tracker=tracker
+            variant_config, rules, llm_client, usage_tracker=tracker
         )
         # Verify against a throwaway workspace so redaction-log writes and any
         # verification results never touch the real one.
@@ -522,7 +580,7 @@ def benchmark_verify(
         with api_guard(f"benchmark '{label}'"), _progress_bar() as progress:
             task = progress.add_task(label, total=len(baseline))
             for done, original in enumerate(baseline, start=1):
-                verification = verifier._verify_requirement(
+                verification, _ = verifier._verify_requirement(
                     by_id[original.id], scratch
                 )
                 if verification.status == VerificationStatus.VERIFIED:
@@ -621,6 +679,10 @@ def run(
     ),
 ) -> None:
     """Full pipeline: ingest -> classify -> verify -> report."""
+    # Fail fast before spending anything: a provider without live Learn
+    # search cannot run the verify stage.
+    if not skip_verify:
+        _require_learn_search(load_config(config_path))
     run_tracker = UsageTracker()
     run_tracker.merge(
         ingest(
@@ -652,8 +714,8 @@ def run(
     report(config_path=config_path, workspace_path=None, out=None)
     _print_cost(
         run_tracker,
-        load_config(config_path).model,
-        "=== Total Claude API cost for this run ===",
+        load_config(config_path),
+        "=== Total LLM usage for this run ===",
     )
 
 
@@ -675,9 +737,6 @@ def eval_cmd(
     ),
 ) -> None:
     """Run the pipeline against the golden set and score it against the gates."""
-    _require_api_key()
-    import anthropic
-
     from fitgap.classify import Classifier
     from fitgap.evaluate import (
         ACCURACY_GATE,
@@ -692,9 +751,11 @@ def eval_cmd(
         typer.secho(f"Golden set not found: {golden_path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     config = load_config(config_path)
+    if verify_citations:
+        _require_learn_search(config)
+    client = _build_llm(config, config_path)
     golden = load_golden_set(golden_path)
     workspace = golden_workspace(golden)
-    client = anthropic.Anthropic()
 
     typer.echo(
         f"Classifying {len(golden.requirements)} golden requirements with "
@@ -747,7 +808,7 @@ def eval_cmd(
         for req_id, url in result.dead_citations:
             typer.secho(f"  DEAD CITATION {req_id}: {url}", fg=typer.colors.RED)
 
-    _print_cost(tracker, config.model, "Claude API cost (eval):")
+    _print_cost(tracker, config, "LLM usage (eval):")
     if result.gates_met:
         typer.secho("\nGATES MET — ready for real projects.", fg=typer.colors.GREEN)
     else:

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from fitgap.classify.prompts import CLASSIFY_SYSTEM_PROMPT
 from fitgap.config import Config
+from fitgap.llm import StructuredOutputError, as_llm_client
 from fitgap.models import (
     Category,
     Classification,
@@ -89,13 +90,13 @@ class Classifier:
         self,
         config: Config,
         rules: RedactionRules,
-        client,  # anthropic.Anthropic or a test double
+        client,  # fitgap.llm.LLMClient, anthropic.Anthropic, or a test double
         batch_size: int = DEFAULT_BATCH_SIZE,
         usage_tracker=None,  # fitgap.usage.UsageTracker
     ) -> None:
         self.config = config
         self.rules = rules
-        self.client = client
+        self.llm = as_llm_client(client, model=config.model)
         self.batch_size = batch_size
         self.usage_tracker = usage_tracker
 
@@ -150,34 +151,22 @@ class Classifier:
                 }
             )
 
-        response = self.client.messages.create(
-            model=self.config.model,
-            max_tokens=8192,
-            system=CLASSIFY_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Classify the following requirements:\n\n"
-                        + json.dumps(payload, indent=2)
-                    ),
-                }
-            ],
-            tools=[CLASSIFY_TOOL],
-            tool_choice={"type": "tool", "name": "record_classifications"},
-        )
-        if self.usage_tracker:
-            self.usage_tracker.record("classify", response)
-
-        tool_input = None
-        for block in response.content:
-            if getattr(block, "type", None) == "tool_use":
-                tool_input = block.input
-                break
-        if tool_input is None:
-            raise ClassificationError(
-                "Model response contained no record_classifications tool call."
+        try:
+            tool_input = self.llm.structured(
+                system=CLASSIFY_SYSTEM_PROMPT,
+                user=(
+                    "Classify the following requirements:\n\n"
+                    + json.dumps(payload, indent=2)
+                ),
+                tool_name=CLASSIFY_TOOL["name"],
+                tool_description=CLASSIFY_TOOL["description"],
+                schema=CLASSIFY_TOOL["input_schema"],
+                max_tokens=8192,
+                stage="classify",
+                tracker=self.usage_tracker,
             )
+        except StructuredOutputError as exc:
+            raise ClassificationError(str(exc)) from exc
 
         by_id = {r.id: r for r in batch}
         applied = 0

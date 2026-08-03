@@ -13,8 +13,11 @@ dependencies = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "anthropic>=0.40",
+    "openai>=1.40",
     "requests>=2.31",
     "pyyaml>=6.0",
+    "ruamel.yaml>=0.18",
+    "keyring>=25.0",
     "rapidfuzz>=3.6",
 ]
 

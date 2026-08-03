@@ -24,6 +24,13 @@ from urllib.parse import urlparse
 import requests
 
 from fitgap.config import Config
+from fitgap.llm import UnsupportedFeatureError, as_llm_client
+from fitgap.llm.anthropic_client import (  # noqa: F401 (re-exports)
+    LEARN_MCP_URL,
+    LEARN_SEARCH_TOOL,
+    MCP_BETA,
+    MCP_TOOLSET_BETA,
+)
 from fitgap.models import (
     CATEGORIES_REQUIRING_VERIFICATION,
     Requirement,
@@ -32,14 +39,6 @@ from fitgap.models import (
     Workspace,
 )
 from fitgap.redact import RedactionRules, anonymise
-
-LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
-MCP_BETA = "mcp-client-2025-04-04"
-#: Newer MCP beta. Required for per-tool enablement, which needs an explicit
-#: `mcp_toolset` entry in `tools` alongside `mcp_servers`.
-MCP_TOOLSET_BETA = "mcp-client-2025-11-20"
-#: Compact search over Learn: title + URL + excerpt, capped per chunk.
-LEARN_SEARCH_TOOL = "microsoft_docs_search"
 
 VERIFY_SYSTEM_PROMPT = """\
 You verify claims about Microsoft Dynamics 365 and Power Platform capabilities \
@@ -51,6 +50,14 @@ A claim is confirmed ONLY if a learn.microsoft.com page you retrieved in this \
 conversation explicitly documents the capability as described. If you cannot \
 find such a page, say so — an honest "not confirmed" is far more valuable than \
 a guessed citation.
+
+Be token-efficient with your searching. Prefer search-result excerpts; \
+retrieve a full page only when the excerpts are not enough to confirm the \
+claim. Use at most three tool calls for this claim: one well-chosen search \
+usually suffices, a second search or one page retrieval when needed. If you \
+cannot confirm the claim within that budget, answer honestly that it is not \
+confirmed — never pad the answer with extra searches, and never compensate by \
+citing from memory.
 
 Also report whether the page indicates the feature is in PREVIEW or is \
 DEPRECATED/being retired.
@@ -113,17 +120,27 @@ class Verifier:
         self,
         config: Config,
         rules: RedactionRules,
-        client,  # anthropic.Anthropic or a test double
+        client,  # fitgap.llm.LLMClient, anthropic.Anthropic, or a test double
         url_checker: Callable[[str], UrlCheckResult] = check_learn_url,
         usage_tracker=None,  # fitgap.usage.UsageTracker
     ) -> None:
         self.config = config
         self.rules = rules
-        self.client = client
+        self.llm = as_llm_client(client, model=config.model)
         self.url_checker = url_checker
         self.usage_tracker = usage_tracker
 
     # ------------------------------------------------------------------ API
+
+    @staticmethod
+    def _claim_key(req: Requirement) -> tuple[str, str]:
+        """Requirements that rely on the same feature via the same approach
+        make the same capability claim — one verification covers them all."""
+        classification = req.classification
+        return (
+            " ".join(classification.feature_relied_on.lower().split()),
+            " ".join(classification.proposed_approach.lower().split()),
+        )
 
     def verify_workspace(
         self,
@@ -131,8 +148,21 @@ class Verifier:
         force: bool = False,
         on_progress=None,  # callable(done, total) for progress display
     ) -> dict[str, int]:
-        """Verify capability claims in place; returns counts by outcome."""
-        counts = {"verified": 0, "unconfirmed": 0, "not_required": 0, "skipped": 0}
+        """Verify capability claims in place; returns counts by outcome.
+
+        Identical claims (same feature relied on + proposed approach) are
+        verified once per run; the other rows reuse the result and citation
+        without extra API calls (counted under ``reused``). Transient API
+        failures are never reused — each affected row retries on the next run.
+        """
+        counts = {
+            "verified": 0,
+            "unconfirmed": 0,
+            "not_required": 0,
+            "skipped": 0,
+            "reused": 0,
+        }
+        claim_cache: dict[tuple[str, str], Verification] = {}
         total = len(workspace.requirements)
         if on_progress:
             on_progress(0, total)
@@ -157,7 +187,17 @@ class Verifier:
                 if already_verified and not force:
                     counts["verified"] += 1
                     continue
-                req.verification = self._verify_requirement(req, workspace)
+                key = self._claim_key(req)
+                cached = claim_cache.get(key)
+                if cached is not None:
+                    req.verification = cached.model_copy(deep=True)
+                    counts["reused"] += 1
+                else:
+                    req.verification, cacheable = self._verify_requirement(
+                        req, workspace
+                    )
+                    if cacheable:
+                        claim_cache[key] = req.verification
                 counts[
                     "verified"
                     if req.verification.status == VerificationStatus.VERIFIED
@@ -172,7 +212,10 @@ class Verifier:
 
     def _verify_requirement(
         self, req: Requirement, workspace: Workspace
-    ) -> Verification:
+    ) -> tuple[Verification, bool]:
+        """Verify one claim; returns (verification, cacheable). Only genuine
+        model verdicts are cacheable — a transient API failure must not be
+        propagated to every other row making the same claim."""
         redacted_text, events = anonymise(
             req.text, self.rules, requirement_id=req.id
         )
@@ -185,128 +228,76 @@ class Verifier:
             f"Requirement it must satisfy: {redacted_text}\n"
         )
         try:
-            raw = self._call_model(user_prompt)
+            raw = self.llm.learn_search(
+                system=VERIFY_SYSTEM_PROMPT,
+                user=user_prompt,
+                verify=self.config.verify,
+                max_tokens=2048,
+                stage="verify",
+                tracker=self.usage_tracker,
+            )
+        except UnsupportedFeatureError:
+            # The provider simply cannot do live Learn search — surface it
+            # instead of silently marking every row UNCONFIRMED.
+            raise
         except Exception as exc:  # API failure must downgrade, never fabricate
-            return Verification(
-                status=VerificationStatus.UNCONFIRMED,
-                notes=f"Verification call failed: {exc}",
+            return (
+                Verification(
+                    status=VerificationStatus.UNCONFIRMED,
+                    notes=f"Verification call failed: {exc}",
+                ),
+                False,  # transient — do not reuse for other rows
             )
 
         result = self._parse_result(raw)
         if result is None:
-            return Verification(
-                status=VerificationStatus.UNCONFIRMED,
-                notes="Model returned no parseable verification result.",
+            return (
+                Verification(
+                    status=VerificationStatus.UNCONFIRMED,
+                    notes="Model returned no parseable verification result.",
+                ),
+                False,  # garbage output may be transient — retry per row
             )
         if not result.get("confirmed") or not result.get("citation_url"):
-            return Verification(
-                status=VerificationStatus.UNCONFIRMED,
-                notes=result.get("notes") or "Model could not confirm the capability.",
+            return (
+                Verification(
+                    status=VerificationStatus.UNCONFIRMED,
+                    notes=result.get("notes")
+                    or "Model could not confirm the capability.",
+                ),
+                True,  # a genuine "not confirmed" verdict holds for the claim
             )
 
         check = self.url_checker(result["citation_url"])
         if not check.ok:
             # The model *claimed* a citation but it failed the liveness guard —
             # exactly the failure mode the register must surface loudly.
-            return Verification(
-                status=VerificationStatus.UNCONFIRMED,
-                notes=f"Model citation rejected: {check.reason}",
+            return (
+                Verification(
+                    status=VerificationStatus.UNCONFIRMED,
+                    notes=f"Model citation rejected: {check.reason}",
+                ),
+                True,  # the claim's citation is dead — true for every row
             )
 
         page_title = check.page_title or result.get("page_title")
         title_lower = (page_title or "").lower()
-        return Verification(
-            status=VerificationStatus.VERIFIED,
-            citation_url=check.final_url,
-            page_title=page_title,
-            retrieved_at=datetime.now(timezone.utc),
-            preview_flag=bool(result.get("preview")) or "preview" in title_lower,
-            deprecated_flag=bool(result.get("deprecated"))
-            or "deprecated" in title_lower,
-            notes=result.get("notes"),
+        return (
+            Verification(
+                status=VerificationStatus.VERIFIED,
+                citation_url=check.final_url,
+                page_title=page_title,
+                retrieved_at=datetime.now(timezone.utc),
+                preview_flag=bool(result.get("preview")) or "preview" in title_lower,
+                deprecated_flag=bool(result.get("deprecated"))
+                or "deprecated" in title_lower,
+                notes=result.get("notes"),
+            ),
+            True,
         )
 
-    def _system(self):
-        """System prompt, cached when enabled.
-
-        Rendering order is tools -> system -> messages, so a breakpoint on the
-        last system block caches the tool definitions too. That prefix is
-        identical for every claim, so it is reused across requirements and
-        across each round of the server-side tool loop.
-        """
-        if not self.config.verify.cache_prompt:
-            return VERIFY_SYSTEM_PROMPT
-        return [
-            {
-                "type": "text",
-                "text": VERIFY_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-
-    def _call_model(self, user_prompt: str) -> list:
-        settings = self.config.verify
-        model = settings.model or self.config.model
-        messages = [{"role": "user", "content": user_prompt}]
-
-        if settings.mode == "mcp":
-            mcp_servers = [
-                {"type": "url", "url": LEARN_MCP_URL, "name": "microsoft-learn"}
-            ]
-            if settings.search_only:
-                # Per-tool enablement needs the newer beta, which in turn
-                # requires an explicit mcp_toolset entry in `tools`. Withholding
-                # microsoft_docs_fetch keeps whole Learn pages out of context.
-                response = self.client.beta.messages.create(
-                    model=model,
-                    max_tokens=2048,
-                    system=self._system(),
-                    messages=messages,
-                    mcp_servers=mcp_servers,
-                    tools=[
-                        {
-                            "type": "mcp_toolset",
-                            "mcp_server_name": "microsoft-learn",
-                            "default_config": {"enabled": False},
-                            "configs": [{"name": LEARN_SEARCH_TOOL, "enabled": True}],
-                        }
-                    ],
-                    betas=[MCP_TOOLSET_BETA],
-                )
-            else:
-                response = self.client.beta.messages.create(
-                    model=model,
-                    max_tokens=2048,
-                    system=self._system(),
-                    messages=messages,
-                    mcp_servers=mcp_servers,
-                    betas=[MCP_BETA],
-                )
-        else:  # web_search fallback, locked to learn.microsoft.com
-            response = self.client.messages.create(
-                model=model,
-                max_tokens=2048,
-                system=self._system(),
-                messages=messages,
-                tools=[
-                    {
-                        "type": "web_search_20250305",
-                        "name": "web_search",
-                        "max_uses": settings.max_searches,
-                        "allowed_domains": ["learn.microsoft.com"],
-                    }
-                ],
-            )
-        if self.usage_tracker:
-            self.usage_tracker.record("verify", response)
-        return response.content
-
     @staticmethod
-    def _parse_result(content_blocks: list) -> dict | None:
-        text = ""
-        for block in content_blocks:
-            if getattr(block, "type", None) == "text":
-                text = block.text  # last text block wins
+    def _parse_result(text: str) -> dict | None:
         text = text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text, flags=re.IGNORECASE)

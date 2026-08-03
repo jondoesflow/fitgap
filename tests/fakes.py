@@ -32,6 +32,54 @@ class FakeMessages:
         )
 
 
+class FakeChatCompletions:
+    """Test double for the OpenAI-compatible chat.completions surface.
+
+    ``responder`` receives the request kwargs and returns the assistant
+    message namespace (use :func:`chat_tool_call_message` /
+    :func:`chat_text_message`).
+    """
+
+    def __init__(self, responder: Callable[[dict], SimpleNamespace]):
+        self.responder = responder
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=self.responder(kwargs))],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=200),
+        )
+
+
+class FakeOpenAI:
+    """Mimics the slice of openai.OpenAI the OpenAICompatClient touches."""
+
+    def __init__(self, responder: Callable[[dict], SimpleNamespace]):
+        self.chat = SimpleNamespace(completions=FakeChatCompletions(responder))
+
+    @property
+    def calls(self) -> list[dict]:
+        return self.chat.completions.calls
+
+
+def chat_tool_call_message(arguments: dict | str) -> SimpleNamespace:
+    import json as _json
+
+    if isinstance(arguments, dict):
+        arguments = _json.dumps(arguments)
+    return SimpleNamespace(
+        content=None,
+        tool_calls=[
+            SimpleNamespace(function=SimpleNamespace(arguments=arguments))
+        ],
+    )
+
+
+def chat_text_message(text: str) -> SimpleNamespace:
+    return SimpleNamespace(content=text, tool_calls=None)
+
+
 class FakeAnthropic:
     """Mimics the slice of anthropic.Anthropic the pipeline touches.
 
