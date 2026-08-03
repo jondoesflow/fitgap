@@ -580,7 +580,7 @@ def benchmark_verify(
         with api_guard(f"benchmark '{label}'"), _progress_bar() as progress:
             task = progress.add_task(label, total=len(baseline))
             for done, original in enumerate(baseline, start=1):
-                verification, _ = verifier._verify_requirement(
+                verification = verifier._verify_requirement(
                     by_id[original.id], scratch
                 )
                 if verification.status == VerificationStatus.VERIFIED:

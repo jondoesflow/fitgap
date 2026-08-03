@@ -51,13 +51,14 @@ conversation explicitly documents the capability as described. If you cannot \
 find such a page, say so — an honest "not confirmed" is far more valuable than \
 a guessed citation.
 
-Be token-efficient with your searching. Prefer search-result excerpts; \
-retrieve a full page only when the excerpts are not enough to confirm the \
-claim. Use at most three tool calls for this claim: one well-chosen search \
-usually suffices, a second search or one page retrieval when needed. If you \
-cannot confirm the claim within that budget, answer honestly that it is not \
-confirmed — never pad the answer with extra searches, and never compensate by \
-citing from memory.
+Search efficiently, but never at the cost of accuracy. Prefer the excerpts \
+that search returns, and retrieve a full page only when the excerpts are not \
+enough to settle the claim. Stop once you have found documentation that \
+settles it, rather than running further searches to confirm what you already \
+have. Keep going while you still have a promising lead — a claim you gave up \
+on too early is reported as unconfirmed and costs a consultant manual work, \
+so do not stop searching merely to save effort, and never cite from memory to \
+avoid another search.
 
 Also report whether the page indicates the feature is in PREVIEW or is \
 DEPRECATED/being retired.
@@ -151,9 +152,16 @@ class Verifier:
         """Verify capability claims in place; returns counts by outcome.
 
         Identical claims (same feature relied on + proposed approach) are
-        verified once per run; the other rows reuse the result and citation
-        without extra API calls (counted under ``reused``). Transient API
-        failures are never reused — each affected row retries on the next run.
+        verified once per run; the other rows reuse the citation without
+        extra API calls (counted under ``reused``).
+
+        **Only confirmed verdicts are reused.** A citation that was retrieved
+        and passed the liveness guard holds for every row making the same
+        claim. Anything else — an honest "not confirmed", a rejected citation,
+        an API failure, unparseable output — may be an artefact of one
+        search, so every row retries it independently. Reusing a negative
+        would multiply one failed search into a whole block of rows marked
+        UNCONFIRMED, which costs the register far more than the saved call.
         """
         counts = {
             "verified": 0,
@@ -193,10 +201,8 @@ class Verifier:
                     req.verification = cached.model_copy(deep=True)
                     counts["reused"] += 1
                 else:
-                    req.verification, cacheable = self._verify_requirement(
-                        req, workspace
-                    )
-                    if cacheable:
+                    req.verification = self._verify_requirement(req, workspace)
+                    if req.verification.status == VerificationStatus.VERIFIED:
                         claim_cache[key] = req.verification
                 counts[
                     "verified"
@@ -212,10 +218,7 @@ class Verifier:
 
     def _verify_requirement(
         self, req: Requirement, workspace: Workspace
-    ) -> tuple[Verification, bool]:
-        """Verify one claim; returns (verification, cacheable). Only genuine
-        model verdicts are cacheable — a transient API failure must not be
-        propagated to every other row making the same claim."""
+    ) -> Verification:
         redacted_text, events = anonymise(
             req.text, self.rules, requirement_id=req.id
         )
@@ -241,59 +244,43 @@ class Verifier:
             # instead of silently marking every row UNCONFIRMED.
             raise
         except Exception as exc:  # API failure must downgrade, never fabricate
-            return (
-                Verification(
-                    status=VerificationStatus.UNCONFIRMED,
-                    notes=f"Verification call failed: {exc}",
-                ),
-                False,  # transient — do not reuse for other rows
+            return Verification(
+                status=VerificationStatus.UNCONFIRMED,
+                notes=f"Verification call failed: {exc}",
             )
 
         result = self._parse_result(raw)
         if result is None:
-            return (
-                Verification(
-                    status=VerificationStatus.UNCONFIRMED,
-                    notes="Model returned no parseable verification result.",
-                ),
-                False,  # garbage output may be transient — retry per row
+            return Verification(
+                status=VerificationStatus.UNCONFIRMED,
+                notes="Model returned no parseable verification result.",
             )
         if not result.get("confirmed") or not result.get("citation_url"):
-            return (
-                Verification(
-                    status=VerificationStatus.UNCONFIRMED,
-                    notes=result.get("notes")
-                    or "Model could not confirm the capability.",
-                ),
-                True,  # a genuine "not confirmed" verdict holds for the claim
+            return Verification(
+                status=VerificationStatus.UNCONFIRMED,
+                notes=result.get("notes") or "Model could not confirm the capability.",
             )
 
         check = self.url_checker(result["citation_url"])
         if not check.ok:
             # The model *claimed* a citation but it failed the liveness guard —
             # exactly the failure mode the register must surface loudly.
-            return (
-                Verification(
-                    status=VerificationStatus.UNCONFIRMED,
-                    notes=f"Model citation rejected: {check.reason}",
-                ),
-                True,  # the claim's citation is dead — true for every row
+            return Verification(
+                status=VerificationStatus.UNCONFIRMED,
+                notes=f"Model citation rejected: {check.reason}",
             )
 
         page_title = check.page_title or result.get("page_title")
         title_lower = (page_title or "").lower()
-        return (
-            Verification(
-                status=VerificationStatus.VERIFIED,
-                citation_url=check.final_url,
-                page_title=page_title,
-                retrieved_at=datetime.now(timezone.utc),
-                preview_flag=bool(result.get("preview")) or "preview" in title_lower,
-                deprecated_flag=bool(result.get("deprecated"))
-                or "deprecated" in title_lower,
-                notes=result.get("notes"),
-            ),
-            True,
+        return Verification(
+            status=VerificationStatus.VERIFIED,
+            citation_url=check.final_url,
+            page_title=page_title,
+            retrieved_at=datetime.now(timezone.utc),
+            preview_flag=bool(result.get("preview")) or "preview" in title_lower,
+            deprecated_flag=bool(result.get("deprecated"))
+            or "deprecated" in title_lower,
+            notes=result.get("notes"),
         )
 
     @staticmethod
