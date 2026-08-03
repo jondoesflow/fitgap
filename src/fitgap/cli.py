@@ -413,6 +413,11 @@ def verify(
     workspace.save(ws_path)
 
     typer.echo(f"\n  Verified with live citation: {counts['verified']}")
+    if counts.get("reused"):
+        typer.echo(
+            f"  Duplicate claims shared an existing result "
+            f"(API calls saved): {counts['reused']}"
+        )
     if counts["unconfirmed"]:
         typer.secho(
             f"  UNCONFIRMED — validate manually: {counts['unconfirmed']}",

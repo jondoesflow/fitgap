@@ -132,6 +132,8 @@ Defence in depth, in plain code, not prompts:
 - Any failure — fabricated URL, dead page, off-domain redirect, model uncertainty, API error — downgrades the row to **UNCONFIRMED — validate manually**. A fabricated citation can never reach the register.
 - Learn pages indicating **preview** or **deprecated** status set warning flags shown in the register.
 
+Token efficiency (the Learn MCP server itself is free — cost is model tokens): requirements making the **identical capability claim** (same feature relied on + same proposed approach) are verified once per run and share the resulting citation (`API calls saved` in the run output); transient API failures are never shared. The verify prompt also enforces a small search budget (prefer excerpts, fetch a full page only when needed, at most three tool calls). Neither measure can produce a false VERIFIED — token limits can only ever downgrade a row to UNCONFIRMED, because the HTTP liveness guard is unchanged. Re-run `fitgap eval` after tuning to confirm the accuracy gates still pass.
+
 ### 4. Report — `fitgap report`
 
 Generates the Excel register (`openpyxl`):
