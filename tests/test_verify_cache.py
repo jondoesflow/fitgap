@@ -97,8 +97,13 @@ def test_different_claims_are_verified_separately():
     assert counts["reused"] == 0
 
 
-def test_honest_not_confirmed_is_reused():
-    """A genuine 'not confirmed' verdict holds for every row making the claim."""
+def test_not_confirmed_is_never_reused():
+    """Only confirmed verdicts are shared.
+
+    A failed search is often an artefact of that one attempt; reusing it
+    would multiply a single miss into a block of UNCONFIRMED rows, so every
+    row retries the claim for itself.
+    """
     workspace = workspace_of(requirement("REQ-001"), requirement("REQ-002"))
     fake = FakeAnthropic(
         json_responder(
@@ -108,19 +113,44 @@ def test_honest_not_confirmed_is_reused():
     counts = Verifier(Config(), RULES, fake, url_checker=ok_checker).verify_workspace(
         workspace
     )
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # each row got its own attempt
     assert counts["unconfirmed"] == 2
-    assert counts["reused"] == 1
+    assert counts["reused"] == 0
 
 
-def test_dead_citation_verdict_is_reused():
+def test_second_row_can_confirm_what_the_first_missed():
+    """The retry is what makes not-reusing-negatives worth the extra call."""
+    answers = iter(
+        [
+            {"confirmed": False, "citation_url": None, "notes": "Nothing found."},
+            CONFIRMED,
+        ]
+    )
+    fake = FakeAnthropic(lambda kwargs: [text_block(json.dumps(next(answers)))])
+    workspace = workspace_of(requirement("REQ-001"), requirement("REQ-002"))
+    counts = Verifier(Config(), RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace
+    )
+    assert counts == {
+        "verified": 1,
+        "unconfirmed": 1,
+        "not_required": 0,
+        "skipped": 0,
+        "reused": 0,
+    }
+    assert workspace.requirements[1].verification.citation_url == LEARN_URL
+
+
+def test_dead_citation_verdict_is_never_reused():
+    """A rejected citation may be one bad URL — the next row searches again."""
     workspace = workspace_of(requirement("REQ-001"), requirement("REQ-002"))
     fake = FakeAnthropic(json_responder(CONFIRMED))
     counts = Verifier(
         Config(), RULES, fake, url_checker=failing_checker
     ).verify_workspace(workspace)
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
     assert counts["unconfirmed"] == 2
+    assert counts["reused"] == 0
     assert "rejected" in workspace.requirements[1].verification.notes
 
 
@@ -161,11 +191,15 @@ def test_garbage_output_is_not_cached():
     assert workspace.requirements[1].verification.status == VerificationStatus.VERIFIED
 
 
-def test_verify_prompt_carries_search_budget():
+def test_verify_prompt_prefers_excerpts_without_capping_the_search():
+    """Cost guidance must not tell the model to give up on a live lead."""
     from fitgap.verify.learn_verifier import VERIFY_SYSTEM_PROMPT
 
-    assert "at most three tool calls" in VERIFY_SYSTEM_PROMPT
+    assert "Prefer the excerpts" in VERIFY_SYSTEM_PROMPT
     assert "never answer from memory" in VERIFY_SYSTEM_PROMPT  # accuracy rule intact
+    # No hard call cap, and no instruction to stop searching to save effort.
+    assert "at most three tool calls" not in VERIFY_SYSTEM_PROMPT
+    assert "do not stop searching merely to save effort" in VERIFY_SYSTEM_PROMPT
 
 
 # --- verify cost knobs (merged from main) flow through the LLM abstraction ---
