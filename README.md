@@ -90,6 +90,8 @@ fitgap verify                                              # live Learn citation
 fitgap report                                              # -> fitgap_register.xlsx
 ```
 
+Runs use Anthropic by default; to switch the LLM provider/model see `fitgap model` below (or the [cheat sheet](docs/QUICKSTART.md)).
+
 ## Pipeline stages
 
 ### 1. Ingest — `fitgap ingest <sources...>`
@@ -223,6 +225,7 @@ golden/golden_set.yaml # 25 hand-verified evaluation cases
 
 ## Documentation
 
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — one-page command cheat sheet (setup, `model` commands, pipeline, eval)
 - [docs/configuration.md](docs/configuration.md) — full `fitgap.yaml` / `redact.yaml` / env var reference
 - [docs/methodology.md](docs/methodology.md) — the fit-gap methodology, taxonomy, and verification policy
 - [docs/development.md](docs/development.md) — architecture, testing strategy, and contribution guide
