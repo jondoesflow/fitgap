@@ -227,6 +227,7 @@ golden/golden_set.yaml # 25 hand-verified evaluation cases
 
 ## Documentation
 
+- [docs/EXECUTIVE_SUMMARY.md](docs/EXECUTIVE_SUMMARY.md) — one-page, non-technical overview of what FitGap does and why it's trustworthy
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — one-page command cheat sheet (setup, `model` commands, pipeline, eval)
 - [docs/configuration.md](docs/configuration.md) — full `fitgap.yaml` / `redact.yaml` / env var reference
 - [docs/methodology.md](docs/methodology.md) — the fit-gap methodology, taxonomy, and verification policy
