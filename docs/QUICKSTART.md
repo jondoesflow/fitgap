@@ -59,6 +59,7 @@ Notes:
 ```bash
 fitgap eval              # golden set: classification accuracy + live citation re-check
 fitgap eval --no-verify  # classification accuracy only (faster/cheaper)
+fitgap benchmark-verify  # compare verify cost knobs on cost AND fidelity (workspace untouched)
 ```
 
 Gates: ≥ 90% classification accuracy, 100% of asserted citations resolve live. Run this after switching provider/model — the gates are provider-independent.

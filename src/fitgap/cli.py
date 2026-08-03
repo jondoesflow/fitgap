@@ -8,11 +8,17 @@ from pathlib import Path
 import typer
 
 from fitgap import __version__
+from fitgap.api_errors import api_guard
 from fitgap.config import Config, load_config, save_config
 from fitgap.ingest.docx_parser import parse_docx
 from fitgap.ingest.xlsx_parser import parse_xlsx, resolve_mapping
 from fitgap.model_cli import model_app
-from fitgap.models import ParsedRequirement, SourceReliability, Workspace
+from fitgap.models import (
+    ParsedRequirement,
+    SourceReliability,
+    VerificationStatus,
+    Workspace,
+)
 from fitgap.normalise import build_workspace, dedupe
 from fitgap.redact import load_rules
 from fitgap.usage import UsageTracker
@@ -67,6 +73,40 @@ def _progress_bar():
     )
 
 
+def _validate_api_key(key: str, env_var: str, source: str, keys_url: str) -> None:
+    """Reject keys that cannot be sent as an HTTP header.
+
+    A control or non-ASCII character in the key survives httpx's own checks
+    when it sits mid-value, and is then rejected at the provider's edge as a
+    malformed request: HTTP 400 with an *empty* body and no request-id. That
+    is impossible to diagnose from the SDK error, so catch it here.
+
+    Only positions and code points are reported — never key material.
+    """
+    bad = [
+        (i, ord(ch))
+        for i, ch in enumerate(key)
+        if ord(ch) < 0x20 or ord(ch) == 0x7F or ord(ch) > 0x7E
+    ]
+    if not bad:
+        return
+    detail = ", ".join(f"index {i} = U+{cp:04X}" for i, cp in bad[:10])
+    typer.secho(
+        f"The API key from {source} contains character(s) that are not valid "
+        f"in an HTTP header: {detail}\n"
+        f"(key length {len(key)}; the value itself is not shown)\n\n"
+        "The key was probably corrupted by a copy-paste or by how it was "
+        f"stored. Re-copy it from\n{keys_url} and set it again:\n"
+        f'  env var:   export {env_var}="..."  (PowerShell: $env:{env_var} = "...")\n'
+        "  or store:  fitgap model key <provider>\n"
+        "Without this check the request fails as an opaque HTTP 400 with an "
+        "empty body.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
 def _build_llm(config: Config, config_path: Path):
     """Resolve the active provider's API key and build its client.
 
@@ -105,6 +145,7 @@ def _build_llm(config: Config, config_path: Path):
             err=True,
         )
         raise typer.Exit(code=1)
+    _validate_api_key(resolved.key, spec.env_var, resolved.source, spec.keys_url)
     typer.secho(
         f"LLM provider: {spec.label} ({config.llm.model}) — redacted content "
         f"will be sent to {spec.label} (key from {resolved.source}).",
@@ -194,7 +235,7 @@ def ingest(
         extractor = TranscriptExtractor(
             config, rules, llm_client, usage_tracker=tracker
         )
-        with _progress_bar() as progress:
+        with api_guard("transcript extraction"), _progress_bar() as progress:
             task = progress.add_task(
                 f"Extracting from {transcript_path.name} ({config.model})",
                 total=None,
@@ -325,7 +366,7 @@ def classify(
         batch_size=batch_size,
         usage_tracker=tracker,
     )
-    with _progress_bar() as progress:
+    with api_guard("classify"), _progress_bar() as progress:
         task = progress.add_task(f"Classifying ({config.model})", total=None)
         classified, missing = classifier.classify_workspace(
             workspace,
@@ -398,7 +439,7 @@ def verify(
 
     tracker = UsageTracker()
     verifier = Verifier(config, rules, llm_client, usage_tracker=tracker)
-    with _progress_bar() as progress:
+    with api_guard("verify"), _progress_bar() as progress:
         task = progress.add_task(
             f"Verifying against Microsoft Learn ({config.verify.mode} mode)",
             total=None,
@@ -447,6 +488,135 @@ def verify(
     typer.echo(f"Workspace updated: {ws_path}")
     _print_cost(tracker, config, "LLM usage (verify):")
     return tracker
+
+
+@app.command(name="benchmark-verify")
+def benchmark_verify(
+    config_path: Path = typer.Option(
+        Path("fitgap.yaml"), "--config", "-c", help="Path to fitgap.yaml."
+    ),
+    workspace_path: Path | None = typer.Option(
+        None, "--workspace", "-w", help="Workspace JSON (default from config)."
+    ),
+    sample: int = typer.Option(
+        6, "--sample", "-n", help="How many already-verified rows to re-verify."
+    ),
+) -> None:
+    """Compare verify configurations on cost AND fidelity before switching.
+
+    Verification dominates run cost, but a cheaper setting is only worth having
+    if it still confirms the same claims. This re-verifies a sample of rows that
+    are already VERIFIED and reports, per configuration, the cost per claim and
+    how many rows still confirm — with the same citation URL as the full run.
+
+    The workspace is never modified.
+    """
+    from fitgap.verify import Verifier
+
+    config = load_config(config_path)
+    _require_learn_search(config)  # live Learn search is Anthropic-only
+    llm_client = _build_llm(config, config_path)
+    ws_path = workspace_path or Path(config.output.workspace)
+    if not ws_path.exists():
+        typer.secho(
+            f"Workspace not found: {ws_path} — run 'fitgap verify' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    workspace = Workspace.load(ws_path)
+
+    baseline = [
+        r
+        for r in workspace.requirements
+        if r.verification
+        and r.verification.status == VerificationStatus.VERIFIED
+        and r.verification.citation_url
+    ][:sample]
+    if not baseline:
+        typer.secho(
+            "No VERIFIED rows with a citation to benchmark against — "
+            "run 'fitgap verify' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    cheap = "claude-haiku-4-5"
+    variants: list[tuple[str, dict]] = [
+        ("baseline (current settings)", {}),
+        ("+ prompt caching", {"cache_prompt": True}),
+        ("+ caching, search-only", {"cache_prompt": True, "search_only": True}),
+        (
+            f"+ caching, search-only, {cheap}",
+            {"cache_prompt": True, "search_only": True, "model": cheap},
+        ),
+    ]
+
+    rules = load_rules(Path(config.redact_file))
+    typer.echo(
+        f"Re-verifying {len(baseline)} already-verified requirement(s) "
+        f"under {len(variants)} configuration(s).\n"
+        "The workspace is not modified.\n"
+    )
+
+    results = []
+    for label, overrides in variants:
+        variant_config = config.model_copy(deep=True)
+        for key, value in overrides.items():
+            setattr(variant_config.verify, key, value)
+        tracker = UsageTracker()
+        # One client serves all variants: the per-variant model override flows
+        # through verify.model inside the Learn-search call.
+        verifier = Verifier(
+            variant_config, rules, llm_client, usage_tracker=tracker
+        )
+        # Verify against a throwaway workspace so redaction-log writes and any
+        # verification results never touch the real one.
+        scratch = workspace.model_copy(deep=True)
+        by_id = {r.id: r for r in scratch.requirements}
+
+        confirmed = same_url = 0
+        with api_guard(f"benchmark '{label}'"), _progress_bar() as progress:
+            task = progress.add_task(label, total=len(baseline))
+            for done, original in enumerate(baseline, start=1):
+                verification, _ = verifier._verify_requirement(
+                    by_id[original.id], scratch
+                )
+                if verification.status == VerificationStatus.VERIFIED:
+                    confirmed += 1
+                    if verification.citation_url == original.verification.citation_url:
+                        same_url += 1
+                progress.update(task, completed=done)
+
+        stage = tracker.stages.get("verify")
+        cost = stage.cost_usd(variant_config.model) if stage else None
+        results.append((label, cost, confirmed, same_url, stage))
+
+    typer.secho("\n=== verify configurations ===", fg=typer.colors.CYAN)
+    n = len(baseline)
+    for label, cost, confirmed, same_url, stage in results:
+        cost_text = f"${cost:,.4f}" if cost is not None else "cost unknown"
+        per_claim = f"${cost / n:,.4f}" if cost is not None else "?"
+        projected = (
+            f"${cost / n * 102:,.2f}" if cost is not None else "?"
+        )  # ~102 claims per full run
+        typer.echo(
+            f"  {label}\n"
+            f"      cost {cost_text} ({per_claim}/claim, ~{projected} per 102-claim run)\n"
+            f"      confirmed {confirmed}/{n}, same citation {same_url}/{n}"
+            + (
+                f"\n      {stage.total_input:,} in / {stage.output_tokens:,} out"
+                f", {stage.cache_read_tokens:,} cached"
+                if stage
+                else ""
+            )
+        )
+    typer.secho(
+        "\nPick the cheapest row that still confirms all "
+        f"{n}/{n}. A drop in 'confirmed' means lost functionality, not savings.",
+        fg=typer.colors.YELLOW,
+    )
 
 
 @app.command()

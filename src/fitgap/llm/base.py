@@ -61,15 +61,17 @@ class LLMClient(ABC):
         *,
         system: str,
         user: str,
-        mode: str,
+        verify,  # fitgap.config.VerifyConfig (mode + cost knobs)
         max_tokens: int = 2048,
         stage: str = "verify",
         tracker=None,
     ) -> str:
         """Run the Microsoft-Learn-grounded verification call and return the
-        model's final text. Raises UnsupportedFeatureError on providers
-        without live Learn search support (currently everything except
-        Anthropic, whose API offers the MCP connector / web-search tools)."""
+        model's final text. ``verify`` carries the mode (mcp/web_search) and
+        the cost knobs (cache_prompt, search_only, model override,
+        max_searches). Raises UnsupportedFeatureError on providers without
+        live Learn search support (currently everything except Anthropic,
+        whose API offers the MCP connector / web-search tools)."""
 
 
 def as_llm_client(client, model: str) -> LLMClient:

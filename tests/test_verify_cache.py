@@ -166,3 +166,60 @@ def test_verify_prompt_carries_search_budget():
 
     assert "at most three tool calls" in VERIFY_SYSTEM_PROMPT
     assert "never answer from memory" in VERIFY_SYSTEM_PROMPT  # accuracy rule intact
+
+
+# --- verify cost knobs (merged from main) flow through the LLM abstraction ---
+
+
+def test_cache_prompt_default_wraps_system_with_cache_control():
+    fake = FakeAnthropic(json_responder(CONFIRMED))
+    Verifier(Config(), RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace_of(requirement("REQ-001"))
+    )
+    system = fake.calls[0]["system"]
+    assert isinstance(system, list)
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cache_prompt_off_sends_plain_system():
+    config = Config.model_validate({"verify": {"cache_prompt": False}})
+    fake = FakeAnthropic(json_responder(CONFIRMED))
+    Verifier(config, RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace_of(requirement("REQ-001"))
+    )
+    assert isinstance(fake.calls[0]["system"], str)
+
+
+def test_search_only_restricts_mcp_toolset_to_docs_search():
+    config = Config.model_validate({"verify": {"search_only": True}})
+    fake = FakeAnthropic(json_responder(CONFIRMED))
+    Verifier(config, RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace_of(requirement("REQ-001"))
+    )
+    call = fake.calls[0]
+    assert call["betas"] == ["mcp-client-2025-11-20"]
+    toolset = call["tools"][0]
+    assert toolset["type"] == "mcp_toolset"
+    assert toolset["default_config"] == {"enabled": False}
+    assert toolset["configs"] == [{"name": "microsoft_docs_search", "enabled": True}]
+
+
+def test_verify_model_override_applies_to_verify_calls_only():
+    config = Config.model_validate({"verify": {"model": "claude-haiku-4-5"}})
+    fake = FakeAnthropic(json_responder(CONFIRMED))
+    Verifier(config, RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace_of(requirement("REQ-001"))
+    )
+    assert fake.calls[0]["model"] == "claude-haiku-4-5"
+    assert config.model == "claude-sonnet-4-6"  # run model untouched
+
+
+def test_max_searches_caps_web_search_mode():
+    config = Config.model_validate(
+        {"verify": {"mode": "web_search", "max_searches": 2}}
+    )
+    fake = FakeAnthropic(json_responder(CONFIRMED))
+    Verifier(config, RULES, fake, url_checker=ok_checker).verify_workspace(
+        workspace_of(requirement("REQ-001"))
+    )
+    assert fake.calls[0]["tools"][0]["max_uses"] == 2

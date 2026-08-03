@@ -73,11 +73,47 @@ if (-not (Test-Path (Join-Path $root "redact.yaml"))) {
 }
 
 # --- 4. API key -------------------------------------------------------------
+
+# Returns a list of reasons the key is unusable; empty means it looks fine.
+# Never returns or prints key material - only positions and code points.
+function Get-ApiKeyProblems([string]$key) {
+    $problems = @()
+    if ([string]::IsNullOrEmpty($key)) { return @("is empty") }
+
+    # Characters outside printable ASCII cannot be sent as an HTTP header.
+    # A control character mid-value passes every client-side check and is then
+    # rejected at Anthropic's edge as an opaque HTTP 400 with an empty body.
+    # U+0016 (SYN) is what a console inserts when Ctrl+V is not a paste key.
+    $bad = @()
+    for ($i = 0; $i -lt $key.Length; $i++) {
+        $cp = [int][char]$key[$i]
+        if ($cp -lt 0x20 -or $cp -eq 0x7F -or $cp -gt 0x7E) {
+            $bad += ("index {0} = U+{1:X4}" -f $i, $cp)
+        }
+    }
+    if ($bad.Count -gt 0) {
+        $problems += "contains character(s) invalid in an HTTP header: " + ($bad -join ', ')
+    }
+    if (-not $key.StartsWith("sk-ant-")) { $problems += "does not start with 'sk-ant-'" }
+    if ($key.Length -lt 40) { $problems += "is only $($key.Length) characters long (expected ~108)" }
+    return $problems
+}
+
+function Show-KeyProblems($problems, [int]$length) {
+    Fail "ANTHROPIC_API_KEY $($problems -join '; ')."
+    Step "(key length $length; the value itself is never shown)"
+    Step "Re-copy the key from https://console.anthropic.com/settings/keys"
+    Step "Paste with RIGHT-CLICK or Ctrl+Shift+V - Ctrl+V inserts a control character in some consoles."
+}
+
 if ($env:ANTHROPIC_API_KEY) {
-    if ($env:ANTHROPIC_API_KEY -notlike "sk-ant-*") {
-        Warn "ANTHROPIC_API_KEY is set but doesn't look like an Anthropic key (expected sk-ant-...)."
+    $problems = Get-ApiKeyProblems $env:ANTHROPIC_API_KEY
+    if ($problems.Count -gt 0) {
+        Show-KeyProblems $problems $env:ANTHROPIC_API_KEY.Length
+        Step 'This session variable shadows any permanent one. Clear it with:  $env:ANTHROPIC_API_KEY = $null'
+        Step "Then open a NEW terminal to pick up the permanent key."
     } else {
-        Ok "ANTHROPIC_API_KEY is set."
+        Ok "ANTHROPIC_API_KEY is set and well-formed."
     }
 } else {
     Warn "ANTHROPIC_API_KEY is not set."
@@ -85,7 +121,7 @@ if ($env:ANTHROPIC_API_KEY) {
     $canPrompt = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
     if ($canPrompt) {
         try {
-            $secure = Read-Host "  Paste your Anthropic API key (input hidden, Enter to skip)" -AsSecureString
+            $secure = Read-Host "  Paste your Anthropic API key (input hidden; use right-click or Ctrl+Shift+V, Enter to skip)" -AsSecureString
             $entered = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
                 [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
         } catch {
@@ -93,9 +129,18 @@ if ($env:ANTHROPIC_API_KEY) {
         }
     }
     if ($entered) {
-        $env:ANTHROPIC_API_KEY = $entered.Trim()
-        Ok "API key set for this session."
-        Step 'To make it permanent:  setx ANTHROPIC_API_KEY "sk-ant-..."  (then open a new terminal)'
+        $entered = $entered.Trim()
+        # Validate before accepting: input is hidden, so a failed paste is
+        # invisible and would otherwise surface much later as an opaque 400.
+        $problems = Get-ApiKeyProblems $entered
+        if ($problems.Count -gt 0) {
+            Show-KeyProblems $problems $entered.Length
+            Step "Key NOT set. Re-run this script once you have the key on the clipboard."
+        } else {
+            $env:ANTHROPIC_API_KEY = $entered
+            Ok "API key set for this session."
+            Step 'To make it permanent:  setx ANTHROPIC_API_KEY "sk-ant-..."  (then open a new terminal)'
+        }
     } else {
         Fail "No API key - classify/verify/transcript stages will not run."
         Step 'Set it with:  $env:ANTHROPIC_API_KEY = "sk-ant-..."'

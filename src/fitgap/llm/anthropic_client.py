@@ -13,6 +13,11 @@ from fitgap.llm.schema import validate_instance
 
 LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
 MCP_BETA = "mcp-client-2025-04-04"
+#: Newer MCP beta. Required for per-tool enablement, which needs an explicit
+#: `mcp_toolset` entry in `tools` alongside `mcp_servers`.
+MCP_TOOLSET_BETA = "mcp-client-2025-11-20"
+#: Compact search over Learn: title + URL + excerpt, capped per chunk.
+LEARN_SEARCH_TOOL = "microsoft_docs_search"
 
 
 class AnthropicClient(LLMClient):
@@ -79,42 +84,88 @@ class AnthropicClient(LLMClient):
                 )
         raise StructuredOutputError(self.provider, self.model, tool_name, errors)
 
+    @staticmethod
+    def _learn_system(system: str, cache_prompt: bool):
+        """System prompt, cached when enabled.
+
+        Rendering order is tools -> system -> messages, so a breakpoint on the
+        last system block caches the tool definitions too. That prefix is
+        identical for every claim, so it is reused across requirements and
+        across each round of the server-side tool loop.
+        """
+        if not cache_prompt:
+            return system
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
     def learn_search(
         self,
         *,
         system: str,
         user: str,
-        mode: str,
+        verify,  # fitgap.config.VerifyConfig
         max_tokens: int = 2048,
         stage: str = "verify",
         tracker=None,
     ) -> str:
-        if mode == "mcp":
-            response = self.sdk.beta.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                mcp_servers=[
-                    {
-                        "type": "url",
-                        "url": LEARN_MCP_URL,
-                        "name": "microsoft-learn",
-                    }
-                ],
-                betas=[MCP_BETA],
-            )
+        # verify.model overrides the run model for this stage only —
+        # verification is a constrained search-and-cite task, so a cheaper
+        # (Anthropic) model may do; the URL liveness guard is unchanged.
+        model = verify.model or self.model
+        system_param = self._learn_system(system, verify.cache_prompt)
+        messages = [{"role": "user", "content": user}]
+
+        if verify.mode == "mcp":
+            mcp_servers = [
+                {"type": "url", "url": LEARN_MCP_URL, "name": "microsoft-learn"}
+            ]
+            if verify.search_only:
+                # Per-tool enablement needs the newer beta, which in turn
+                # requires an explicit mcp_toolset entry in `tools`. Withholding
+                # microsoft_docs_fetch keeps whole Learn pages out of context.
+                response = self.sdk.beta.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system_param,
+                    messages=messages,
+                    mcp_servers=mcp_servers,
+                    tools=[
+                        {
+                            "type": "mcp_toolset",
+                            "mcp_server_name": "microsoft-learn",
+                            "default_config": {"enabled": False},
+                            "configs": [
+                                {"name": LEARN_SEARCH_TOOL, "enabled": True}
+                            ],
+                        }
+                    ],
+                    betas=[MCP_TOOLSET_BETA],
+                )
+            else:
+                response = self.sdk.beta.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system_param,
+                    messages=messages,
+                    mcp_servers=mcp_servers,
+                    betas=[MCP_BETA],
+                )
         else:  # web_search fallback, locked to learn.microsoft.com
             response = self.sdk.messages.create(
-                model=self.model,
+                model=model,
                 max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
+                system=system_param,
+                messages=messages,
                 tools=[
                     {
                         "type": "web_search_20250305",
                         "name": "web_search",
-                        "max_uses": 5,
+                        "max_uses": verify.max_searches,
                         "allowed_domains": ["learn.microsoft.com"],
                     }
                 ],

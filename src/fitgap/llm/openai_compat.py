@@ -80,7 +80,7 @@ class OpenAICompatClient(LLMClient):
                 )
         raise StructuredOutputError(self.provider, self.model, tool_name, errors)
 
-    def learn_search(self, *, system, user, mode, max_tokens=2048, stage="verify", tracker=None) -> str:
+    def learn_search(self, *, system, user, verify, max_tokens=2048, stage="verify", tracker=None) -> str:
         raise UnsupportedFeatureError(
             f"Live Microsoft Learn verification requires Anthropic-only API "
             f"features (MCP connector / web search); the active provider is "
@@ -153,15 +153,17 @@ class OpenAICompatClient(LLMClient):
         if usage is None:
             return
         # Normalise OpenAI-style usage onto the Anthropic-style field names
-        # the UsageTracker understands.
+        # the UsageTracker understands; carry the served model through so
+        # per-stage pricing can follow it.
         tracker.record(
             stage,
             SimpleNamespace(
+                model=getattr(response, "model", None),
                 usage=SimpleNamespace(
                     input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                     output_tokens=getattr(usage, "completion_tokens", 0) or 0,
                     cache_read_input_tokens=0,
                     cache_creation_input_tokens=0,
-                )
+                ),
             ),
         )

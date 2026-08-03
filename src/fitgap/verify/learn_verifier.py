@@ -25,7 +25,12 @@ import requests
 
 from fitgap.config import Config
 from fitgap.llm import UnsupportedFeatureError, as_llm_client
-from fitgap.llm.anthropic_client import LEARN_MCP_URL, MCP_BETA  # noqa: F401 (re-export)
+from fitgap.llm.anthropic_client import (  # noqa: F401 (re-exports)
+    LEARN_MCP_URL,
+    LEARN_SEARCH_TOOL,
+    MCP_BETA,
+    MCP_TOOLSET_BETA,
+)
 from fitgap.models import (
     CATEGORIES_REQUIRING_VERIFICATION,
     Requirement,
@@ -226,7 +231,7 @@ class Verifier:
             raw = self.llm.learn_search(
                 system=VERIFY_SYSTEM_PROMPT,
                 user=user_prompt,
-                mode=self.config.verify.mode,
+                verify=self.config.verify,
                 max_tokens=2048,
                 stage="verify",
                 tracker=self.usage_tracker,

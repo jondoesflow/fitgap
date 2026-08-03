@@ -38,6 +38,50 @@ def test_cache_tokens_priced_at_multipliers():
 
 def test_dated_model_id_matches_by_prefix():
     assert lookup_pricing("claude-haiku-4-5-20251001") == (1.0, 5.0)
+
+
+def response_from(model, input_tokens=0, output_tokens=0):
+    r = response(input_tokens=input_tokens, output_tokens=output_tokens)
+    r.model = model
+    return r
+
+
+def test_stage_priced_by_the_model_that_served_it():
+    """verify can run on a cheaper model than the rest of the run."""
+    tracker = UsageTracker()
+    tracker.record("verify", response_from("claude-haiku-4-5", 1_000_000, 100_000))
+    stage = tracker.stages["verify"]
+    assert stage.model == "claude-haiku-4-5"
+    # Priced as Haiku ($1.50) even though the run's model is Sonnet.
+    assert stage.cost_usd("claude-sonnet-4-6") == 1.50
+
+
+def test_mixed_models_in_one_stage_fall_back_to_run_model():
+    tracker = UsageTracker()
+    tracker.record("verify", response_from("claude-haiku-4-5", 1_000_000))
+    tracker.record("verify", response_from("claude-sonnet-4-6", 0))
+    assert tracker.stages["verify"].model is None
+    assert tracker.stages["verify"].cost_usd("claude-sonnet-4-6") == 3.0
+
+
+def test_total_sums_per_stage_costs_across_models():
+    """A single blended rate would misprice a run that mixes models."""
+    tracker = UsageTracker()
+    tracker.record("classify", response_from("claude-sonnet-4-6", 1_000_000))
+    tracker.record("verify", response_from("claude-haiku-4-5", 1_000_000))
+    lines = tracker.summary_lines("claude-sonnet-4-6")
+    total_line = [line for line in lines if "TOTAL" in line][0]
+    # $3.00 (Sonnet classify) + $1.00 (Haiku verify), NOT 2M x Sonnet = $6.00
+    assert "$4.0000" in total_line
+    # The stage that differs from the run model is labelled.
+    assert any("[claude-haiku-4-5]" in line for line in lines)
+
+
+def test_unpriced_model_named_in_note():
+    tracker = UsageTracker()
+    tracker.record("verify", response_from("some-future-model", 1_000))
+    lines = tracker.summary_lines("claude-sonnet-4-6")
+    assert any("some-future-model" in line for line in lines)
     assert lookup_pricing("some-future-model") is None
 
 

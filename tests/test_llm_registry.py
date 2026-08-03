@@ -139,12 +139,14 @@ def test_compat_persistent_garbage_fails_naming_the_model():
     "provider", [p for p in LAUNCH_PROVIDERS if p != "anthropic"]
 )
 def test_learn_search_unsupported_outside_anthropic(provider):
+    from fitgap.config import VerifyConfig
+
     spec = PROVIDERS[provider]
     client = OpenAICompatClient(
         spec, spec.default_model, sdk_client=FakeOpenAI(lambda k: chat_text_message(""))
     )
     with pytest.raises(UnsupportedFeatureError, match="skip-verify"):
-        client.learn_search(system="s", user="u", mode="mcp")
+        client.learn_search(system="s", user="u", verify=VerifyConfig())
 
 
 def test_classifier_works_through_a_compat_provider():
