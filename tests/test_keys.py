@@ -1,5 +1,6 @@
 """Key resolution precedence, storage fallback, and key hygiene."""
 
+import os
 import sys
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fitgap.cli import app
+from fitgap.llm import keys as keys_module
 from fitgap.llm.keys import mask_key, resolve_key, store_key
 from fitgap.llm.registry import PROVIDERS
 
@@ -89,10 +91,49 @@ def test_store_key_falls_back_to_env_file(tmp_path, no_env, broken_keyring):
     assert ".env" in where
     assert warnings  # the plaintext warning is mandatory
     assert env_file.exists()
-    assert oct(env_file.stat().st_mode & 0o777) == "0o600"
     assert f"OPENAI_API_KEY={FILE_KEY}" in env_file.read_text(encoding="utf-8")
     # .env must be git-ignored, adding the entry if missing.
     assert ".env" in (tmp_path / ".gitignore").read_text(encoding="utf-8").split()
+
+    if os.name == "posix":
+        assert oct(env_file.stat().st_mode & 0o777) == "0o600"
+        assert any("0600" in warning for warning in warnings)
+    else:
+        # Windows ignores POSIX mode bits, so the warning must say the file
+        # is unprotected rather than claim a restriction that isn't applied.
+        assert not any("0600" in warning for warning in warnings)
+        assert any("cannot restrict" in warning for warning in warnings)
+
+
+def test_env_file_warning_is_honest_where_chmod_is_not_enforced(
+    tmp_path, no_env, broken_keyring, monkeypatch
+):
+    """The Windows path, exercised from any OS.
+
+    Claiming 0600 on a platform that ignores it would tell a consultant their
+    API key is protected when it is readable by anyone with folder access.
+    """
+    monkeypatch.setattr(keys_module.os, "name", "nt")
+    _, warnings = store_key(OPENAI, FILE_KEY, tmp_path)
+    joined = " ".join(warnings)
+    assert "0600" not in joined
+    assert "cannot restrict" in joined
+    assert "Credential Manager" in joined  # points at the safer option
+
+
+def test_env_file_is_still_written_when_chmod_is_refused(
+    tmp_path, no_env, broken_keyring, monkeypatch
+):
+    """A filesystem that rejects chmod must not lose the key."""
+
+    def refuse(*args, **kwargs):
+        raise OSError("chmod not supported")
+
+    monkeypatch.setattr(keys_module.os, "chmod", refuse)
+    where, warnings = store_key(OPENAI, FILE_KEY, tmp_path)
+    assert ".env" in where
+    assert f"OPENAI_API_KEY={FILE_KEY}" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert any("cannot restrict" in warning for warning in warnings)
 
 
 def test_store_key_appends_gitignore_only_once(tmp_path, no_env, broken_keyring):

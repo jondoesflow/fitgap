@@ -54,6 +54,21 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return entries
 
 
+def _restrict_to_owner(path: Path) -> bool:
+    """Try to make ``path`` readable only by its owner.
+
+    Returns whether the OS actually enforces it. ``os.chmod`` applies POSIX
+    mode bits on Linux and macOS, but on Windows it only toggles the
+    read-only attribute — group and other bits are ignored — so the caller
+    must not report the file as permission-restricted there.
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        return False
+    return os.name == "posix"
+
+
 def _keyring_get(spec: ProviderSpec) -> str | None:
     try:
         import keyring
@@ -100,17 +115,26 @@ def store_key(spec: ProviderSpec, key: str, config_dir: Path) -> tuple[str, list
         + "".join(f"{name}={value}\n" for name, value in entries.items()),
         encoding="utf-8",
     )
-    os.chmod(path, 0o600)
+    restricted = _restrict_to_owner(path)
     _ensure_env_gitignored(config_dir)
-    return (
-        f".env file ({path})",
-        [
-            "OS keyring unavailable — key stored in a plaintext .env file "
-            f"({path}, permissions 0600).",
-            "The file is git-ignored; prefer a real environment variable or "
-            "OS keyring where available.",
-        ],
-    )
+    warnings = [
+        "OS keyring unavailable — key stored in a plaintext .env file "
+        + (f"({path}, permissions 0600)." if restricted else f"({path})."),
+        "The file is git-ignored; prefer a real environment variable or "
+        "OS keyring where available.",
+    ]
+    if not restricted:
+        # Never imply protection the OS is not applying: on Windows os.chmod
+        # only toggles the read-only attribute, so the POSIX mode bits this
+        # would set are not enforced and the file is as readable as its
+        # directory. Say so, and point at the safer options.
+        warnings.append(
+            "This platform cannot restrict the file to your account, so "
+            "anyone who can read the folder can read the key — prefer "
+            "Windows Credential Manager (used automatically when the keyring "
+            "works) or an environment variable."
+        )
+    return f".env file ({path})", warnings
 
 
 def _ensure_env_gitignored(project_dir: Path) -> None:
