@@ -187,7 +187,7 @@ A CLI process cannot persistently set an environment variable in its parent shel
 
 1. **Real environment variable** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`)
 2. **OS keyring** (Windows Credential Manager / macOS Keychain / Secret Service) — where `model key` writes
-3. **`.env` file** next to `fitgap.yaml` — the fallback when no keyring is available (headless/CI). Written with `0600` permissions, git-ignored, and announced with a warning.
+3. **`.env` file** next to `fitgap.yaml` — the fallback when no keyring is available (headless/CI). Git-ignored, announced with a warning, and restricted to your account with `0600` permissions **on Linux and macOS only**: Windows ignores POSIX mode bits, so there the file is as readable as the folder it sits in and the warning says so. On Windows the keyring (Credential Manager) is the default path and rarely falls back.
 
 Keys never appear in the config YAML, logs, error messages, or `model status` output (masked to the last 4 characters). If no key resolves for the active provider, LLM stages fail with a message naming the exact env var and the `model key` command; `fitgap ingest` (without `--transcript`) and `fitgap report` work fully offline with no key at all.
 

@@ -119,7 +119,7 @@ Writes to `fitgap.yaml` preserve existing content and comments (ruamel.yaml roun
 | `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MOONSHOT_API_KEY` / `GEMINI_API_KEY` / `MISTRAL_API_KEY` / `XAI_API_KEY` | The same stages, when the matching provider is active | Only the active provider's key is needed. |
 | `AZURE_DEVOPS_PAT` (or the name set in `ado.pat_env_var`) | `ingest ado` | PAT with Work Items (Read) scope. |
 
-Key resolution precedence (first hit wins; `fitgap model status` reports the true source): **real environment variable → OS keyring → `.env` file** next to `fitgap.yaml`. The `.env` fallback is written by `fitgap model key` only when no OS keyring is available, with `0600` permissions and a `.gitignore` entry. API keys are never stored in `fitgap.yaml` and never appear in logs or output (masked to the last 4 characters).
+Key resolution precedence (first hit wins; `fitgap model status` reports the true source): **real environment variable → OS keyring → `.env` file** next to `fitgap.yaml`. The `.env` fallback is written by `fitgap model key` only when no OS keyring is available, always with a `.gitignore` entry, and with `0600` permissions on Linux and macOS. Windows does not enforce POSIX mode bits, so on Windows the file is only as protected as its folder — `fitgap model key` says so explicitly and points you at Credential Manager (the keyring default) or an environment variable instead. API keys are never stored in `fitgap.yaml` and never appear in logs or output (masked to the last 4 characters).
 
 ## CLI flags worth knowing
 
