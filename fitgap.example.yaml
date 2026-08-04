@@ -7,6 +7,11 @@
 llm:
   provider: anthropic
   model: claude-sonnet-4-6
+  # Cache the fixed system+tools prefix of classify / transcript extraction so
+  # it bills at cache-read rates after the first call. Cannot change results.
+  # Only engages if that prefix exceeds the model's minimum cacheable size
+  # (512-4096 tokens depending on model) — the run summary says if it didn't.
+  cache_prompt: true
 
 # Anonymisation rules applied before any text is sent to an external API.
 redact_file: redact.yaml

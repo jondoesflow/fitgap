@@ -234,6 +234,7 @@ class TranscriptExtractor:
                     max_tokens=4096,
                     stage="extract",
                     tracker=self.usage_tracker,
+                    cache_prompt=self.config.llm.cache_prompt,
                 )
             except StructuredOutputError as exc:
                 raise ClassificationError(str(exc)) from exc

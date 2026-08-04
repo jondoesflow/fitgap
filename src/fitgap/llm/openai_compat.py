@@ -51,7 +51,12 @@ class OpenAICompatClient(LLMClient):
         max_tokens: int = 8192,
         stage: str = "llm",
         tracker=None,
+        cache_prompt: bool = True,  # noqa: ARG002 — see below
     ) -> dict:
+        # OpenAI-compatible providers cache the prefix automatically (OpenAI
+        # and DeepSeek both do so server-side); there is no breakpoint to
+        # place, and sending Anthropic's cache_control block would be
+        # rejected. Cached tokens are still reported — see _record.
         prompt = user
         errors: list[str] = []
         for attempt in range(2):
@@ -155,14 +160,20 @@ class OpenAICompatClient(LLMClient):
         # Normalise OpenAI-style usage onto the Anthropic-style field names
         # the UsageTracker understands; carry the served model through so
         # per-stage pricing can follow it.
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+        # OpenAI counts cached tokens *inside* prompt_tokens; Anthropic reports
+        # them separately. Subtract so the tracker's total_input still equals
+        # the prompt size instead of double-counting the cached span.
         tracker.record(
             stage,
             SimpleNamespace(
                 model=getattr(response, "model", None),
                 usage=SimpleNamespace(
-                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    input_tokens=max(prompt_tokens - cached, 0),
                     output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                    cache_read_input_tokens=0,
+                    cache_read_input_tokens=cached,
                     cache_creation_input_tokens=0,
                 ),
             ),

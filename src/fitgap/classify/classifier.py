@@ -164,6 +164,7 @@ class Classifier:
                 max_tokens=8192,
                 stage="classify",
                 tracker=self.usage_tracker,
+                cache_prompt=self.config.llm.cache_prompt,
             )
         except StructuredOutputError as exc:
             raise ClassificationError(str(exc)) from exc

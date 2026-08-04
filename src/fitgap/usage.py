@@ -95,6 +95,18 @@ class StageUsage:
         return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
 
 
+def _cache_note(usage: "StageUsage") -> str:
+    """Cache detail for a summary line: reads are the saving, writes are the
+    ~1.25x premium paid to create the entry — showing both makes it obvious
+    whether caching is working or just costing."""
+    parts = []
+    if usage.cache_read_tokens:
+        parts.append(f"{usage.cache_read_tokens:,} cached")
+    if usage.cache_write_tokens:
+        parts.append(f"{usage.cache_write_tokens:,} cache-write")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 class UsageTracker:
     """Accumulates per-stage usage across the API calls of one CLI invocation."""
 
@@ -119,6 +131,34 @@ class UsageTracker:
             total.merge(stage_usage)
         return total
 
+    def _cache_diagnostics(self, model: str) -> list[str]:
+        """Explain prompt caching when it did not pay off.
+
+        Caching is easy to enable and easy to have silently do nothing: a
+        prefix below the model's minimum is not cached, with no error. Rather
+        than leave that invisible, say which case a stage is in.
+        """
+        from fitgap.llm.caching import cache_minimum
+
+        lines = []
+        for stage, usage in self.stages.items():
+            if usage.calls < 2 or usage.cache_read_tokens:
+                continue  # nothing to reuse yet, or caching already working
+            served = usage.model or model
+            if usage.cache_write_tokens:
+                lines.append(
+                    f"  ({stage}: wrote {usage.cache_write_tokens:,} cache token(s) "
+                    "but read none back — something changes the prefix between "
+                    "calls)"
+                )
+            else:
+                lines.append(
+                    f"  ({stage}: no prompt caching over {usage.calls} calls — the "
+                    f"cached prefix is likely below {served}'s "
+                    f"{cache_minimum(served):,}-token minimum)"
+                )
+        return lines
+
     def summary_lines(self, model: str) -> list[str]:
         """Human-readable cost summary; one line per stage plus a total."""
         if not self.stages:
@@ -132,11 +172,9 @@ class UsageTracker:
             # Name the model only when the stage did not use the run's model.
             served_by = stage_usage.model
             suffix = f" [{served_by}]" if served_by and served_by != model else ""
-            cached = stage_usage.cache_read_tokens
-            cache_note = f", {cached:,} cached" if cached else ""
             lines.append(
                 f"  {stage}: {cost_text}  ({stage_usage.calls} call(s), "
-                f"{stage_usage.total_input:,} in{cache_note} / "
+                f"{stage_usage.total_input:,} in{_cache_note(stage_usage)} / "
                 f"{stage_usage.output_tokens:,} out tokens){suffix}"
             )
         if len(self.stages) > 1:
@@ -145,13 +183,12 @@ class UsageTracker:
             # merged token counts cannot be priced with a single rate.
             cost = None if any(c is None for c in costs) else sum(costs)
             cost_text = f"${cost:,.4f}" if cost is not None else "cost unknown"
-            cached = total.cache_read_tokens
-            cache_note = f", {cached:,} cached" if cached else ""
             lines.append(
                 f"  TOTAL: {cost_text}  ({total.calls} call(s), "
-                f"{total.total_input:,} in{cache_note} / "
+                f"{total.total_input:,} in{_cache_note(total)} / "
                 f"{total.output_tokens:,} out tokens)"
             )
+        lines.extend(self._cache_diagnostics(model))
         if any(c is None for c in costs):
             unpriced = sorted(
                 {u.model or model for u, c in zip(self.stages.values(), costs) if c is None}

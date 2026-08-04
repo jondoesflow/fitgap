@@ -47,8 +47,14 @@ class LLMClient(ABC):
         max_tokens: int = 8192,
         stage: str = "llm",
         tracker=None,
+        cache_prompt: bool = True,
     ) -> dict:
         """Return a dict conforming to ``schema``.
+
+        ``cache_prompt`` requests prompt caching of the fixed tools+system
+        prefix where the provider takes an explicit breakpoint (Anthropic);
+        providers that cache automatically ignore it. Caching never changes
+        what the model returns — only what the prefix costs.
 
         Implementations must validate the response against the schema, make
         exactly one repair retry on failure, and raise StructuredOutputError
