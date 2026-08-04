@@ -80,6 +80,15 @@ class LLMConfig(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
 
+    #: Cache the fixed tools+system prefix of the classify and transcript
+    #: extraction calls, so it is billed at cache-read rates on every call
+    #: after the first. Caching cannot change what the model returns, so this
+    #: is on by default. Note the prefix must exceed the model's minimum
+    #: cacheable size or the API silently does not cache it — the run summary
+    #: reports whether any cache reads actually happened. Verification has its
+    #: own switch, ``verify.cache_prompt``.
+    cache_prompt: bool = True
+
 
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)

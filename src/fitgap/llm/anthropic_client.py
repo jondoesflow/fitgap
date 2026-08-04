@@ -9,6 +9,7 @@ web-search tool restricted to learn.microsoft.com.
 from __future__ import annotations
 
 from fitgap.llm.base import LLMClient, StructuredOutputError
+from fitgap.llm.caching import cached_system
 from fitgap.llm.schema import validate_instance
 
 LEARN_MCP_URL = "https://learn.microsoft.com/api/mcp"
@@ -44,19 +45,24 @@ class AnthropicClient(LLMClient):
         max_tokens: int = 8192,
         stage: str = "llm",
         tracker=None,
+        cache_prompt: bool = True,
     ) -> dict:
         tool = {
             "name": tool_name,
             "description": tool_description,
             "input_schema": schema,
         }
+        # tools -> system -> messages: a breakpoint on the system block caches
+        # the tool schema too. The per-call payload sits in messages, after
+        # the breakpoint, so batches never invalidate each other's prefix.
+        system_param = cached_system(system, cache_prompt)
         prompt = user
         errors: list[str] = []
         for attempt in range(2):
             response = self.sdk.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
-                system=system,
+                system=system_param,
                 messages=[{"role": "user", "content": prompt}],
                 tools=[tool],
                 tool_choice={"type": "tool", "name": tool_name},
@@ -84,25 +90,6 @@ class AnthropicClient(LLMClient):
                 )
         raise StructuredOutputError(self.provider, self.model, tool_name, errors)
 
-    @staticmethod
-    def _learn_system(system: str, cache_prompt: bool):
-        """System prompt, cached when enabled.
-
-        Rendering order is tools -> system -> messages, so a breakpoint on the
-        last system block caches the tool definitions too. That prefix is
-        identical for every claim, so it is reused across requirements and
-        across each round of the server-side tool loop.
-        """
-        if not cache_prompt:
-            return system
-        return [
-            {
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-
     def learn_search(
         self,
         *,
@@ -117,7 +104,9 @@ class AnthropicClient(LLMClient):
         # verification is a constrained search-and-cite task, so a cheaper
         # (Anthropic) model may do; the URL liveness guard is unchanged.
         model = verify.model or self.model
-        system_param = self._learn_system(system, verify.cache_prompt)
+        # The prefix is identical for every claim, so it is reused across
+        # requirements and across each round of the server-side tool loop.
+        system_param = cached_system(system, verify.cache_prompt)
         messages = [{"role": "user", "content": user}]
 
         if verify.mode == "mcp":

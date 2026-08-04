@@ -111,8 +111,11 @@ def test_merge_and_stage_breakdown():
     assert total.input_tokens == 500
     assert total.output_tokens == 50
     lines = a.summary_lines("claude-haiku-4-5")
-    assert len(lines) == 3  # two stages + TOTAL
-    assert lines[-1].startswith("  TOTAL:")
+    # Cost lines are the stages plus TOTAL; parenthetical notes (pricing gaps,
+    # cache diagnostics) are advisory and may or may not be present.
+    cost_lines = [line for line in lines if not line.lstrip().startswith("(")]
+    assert len(cost_lines) == 3  # two stages + TOTAL
+    assert cost_lines[-1].startswith("  TOTAL:")
 
 
 def test_classifier_records_usage_per_batch():
